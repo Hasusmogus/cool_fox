@@ -391,12 +391,12 @@ impl Module {
         self.blocks.len() - 1
     }
 
-    /// Moves what open block `b` holds so far (its phis and instructions) to a new block,
-    /// which the branches to `b` now reach, and returns it: `b` stays the block code goes on
-    /// in, so a loop can be put between the two while every handle to `b` still names the
-    /// place where code continues.
+    /// Moves what block `b` holds so far (its phis and instructions) to a new block, which
+    /// the branches to `b` now reach, and returns it: `b` stays the block code goes on in,
+    /// with its terminator if it has one (the edges out of it are unchanged), so a loop can
+    /// be put between the two while every handle to `b` still names the place where code
+    /// continues.
     pub fn split_front(&mut self, b: usize) -> usize {
-        assert!(self.blocks[b].term.is_none(), "a block split after its end");
         let front = self.new_block();
         self.blocks[front].phis = std::mem::take(&mut self.blocks[b].phis);
         self.blocks[front].body = std::mem::take(&mut self.blocks[b].body);

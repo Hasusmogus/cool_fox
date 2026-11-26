@@ -674,7 +674,7 @@ pub fn emit(
         // each other ([`pair_meetings`]). Exact, at two pair barriers per exchange; the
         // programs other forms translate keep those forms (`VICTORY_WAVE_WIDE=1` tries this
         // earlier for every program).
-        let several = matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() > 64);
+        let several = matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() > 32);
         if several && pair_meetings() && !wide_on {
             for base in [forms[1].1.as_ref().map(|f| &f.0), forms[0].1.as_ref().map(|f| &f.0), Some(p)]
                 .into_iter()
