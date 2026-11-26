@@ -20,6 +20,11 @@ const S_ENDPGM: u32 = 0xBF81_0000;
 /// `skip`: the branch past the body when no thread is below s0: `s_cbranch_execz`, or
 /// `s_cbranch_scc0` on the SCC `s_and_saveexec` sets ("some lane is left").
 fn program(skip: u32) -> NativeProgram {
+    program_of(skip, 64)
+}
+
+/// [`program`] in groups of `threads` threads (several console waves past 64).
+fn program_of(skip: u32, threads: u32) -> NativeProgram {
     let mut words = vec![
         0x7E0A_0281, // v_mov_b32 v5, 1
         0x2C0C_0081, // v_lshrrev_b32 v6, 1, v0
@@ -35,7 +40,7 @@ fn program(skip: u32) -> NativeProgram {
         0x80 << 24 | 2 << 16, // buffer_store_dword v0, off, s[8:11], 0
         0xBEFE_040C, // s_mov_b64 exec, s[12:13]
     ]);
-    native(&words)
+    native_of(&words, true, threads)
 }
 
 /// A wave64 compute program of 64 threads (one console wave; the thread index in v0) with 4
@@ -739,4 +744,62 @@ fn the_lanes_past_a_count_of_threads_do_not_run() {
             assert_eq!(word, u32::from(i < active) + u32::from(i + 64 < active), "count {count}, word {i}");
         }
     }
+}
+
+/// Two console waves (128 threads) where only the first enters the branch around the wave
+/// reduction: with the branch wave-wide, each console wave decides on its own, so the second
+/// never comes to the meetings inside it. Its two host waves must meet only each other (pair
+/// barriers, `emit::pair_meetings`); with group barriers the first wave would wait for
+/// threads that never come.
+#[test]
+fn a_wave_or_in_one_of_two_console_waves_meets_only_its_own_halves() {
+    if !super::pair_meetings() {
+        return;
+    }
+    let native = program_of(0xBF88_0000, 128);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let branch = (0..p.blocks.len())
+        .find(|&b| p.blocks[b].insts.last().is_some_and(|i| i.name() == "s_cbranch_execz"))
+        .expect("the branch");
+    let wide = HashSet::from([branch]);
+    let shader = lower::with_pair_meetings(|| lowered(&native, &p, &wide)).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return;
+    };
+    let (root, pso) = match host.compute_pipeline(&shader) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("the hardware device does not take this program (waves of 32?): {e}; not run");
+            return;
+        }
+    };
+    // (every thread below s0 is in the first console wave: the second skips the branch)
+    for (below, expected) in [(64u32, u32::MAX), (40, 0x000F_FFFF), (33, 0x0001_FFFF), (10, 0x1F), (1, 1)] {
+        let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        for u in &shader.user_data {
+            if let (RootType::Constants, 0, 0) = (u.root, u.slot, u.dword) {
+                ud[u.index as usize] = below;
+            }
+        }
+        let out = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(ud))],
+                    views: &[View::RawUav(1)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+        assert_eq!(out[0][0], expected, "{below} threads in the branch, all in the first console wave");
+    }
+    eprintln!("ran on the hardware device: two console waves, the first alone in the branch");
 }

@@ -202,6 +202,16 @@ pub fn group_sync() -> u8 {
     })
 }
 
+/// Whether the two host waves of a console wave in a group of several console waves meet
+/// each other alone, through a counter in LDS (`lower::LowerCtx::half_meet`), instead of
+/// meeting the whole group (`VICTORY_PAIR_MEET=0`). With the whole group, console waves that
+/// branch apart would wait for each other at barriers they never share, so such programs
+/// stayed untranslated. Part of the translation: the shader cache keys on it.
+pub fn pair_meetings() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PAIR_MEET").is_none_or(|v| v != "0"))
+}
+
 /// Whether buffer atomics of the ray-tracing structure builder stand between
 /// two fences (`VICTORY_BVH_FENCES=0`: they do not). Part of the
 /// translation: the shader cache keys on it.
@@ -659,6 +669,24 @@ pub fn emit(
                 }
             }
         }
+        // Last of all, for a group of several console waves that no other form took: the
+        // per-lane branches taken wave-wide, each console wave's two host waves meeting only
+        // each other ([`pair_meetings`]). Exact, at two pair barriers per exchange; the
+        // programs other forms translate keep those forms (`VICTORY_WAVE_WIDE=1` tries this
+        // earlier for every program).
+        let several = matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() > 64);
+        if several && pair_meetings() && !wide_on {
+            for base in [forms[1].1.as_ref().map(|f| &f.0), forms[0].1.as_ref().map(|f| &f.0), Some(p)]
+                .into_iter()
+                .flatten()
+            {
+                let again = lower::with_pair_meetings(|| widen(c, native, base, why, false));
+                report("wave-wide branches, pair barriers", &again);
+                if done(&again) {
+                    return again.map(|(shader, _)| shader);
+                }
+            }
+        }
     }
     // SCC of a mask operation joined with a scalar test behind a per-lane skip (the 32-lane
     // trace programs): right once the wave takes that skip together ([`widen`]; the
@@ -706,9 +734,10 @@ pub fn emit(
 /// branches around its cross-lane code taken wave-wide ([`structure::structure_wide`]): the
 /// lowering names the blocks where the two host waves must meet and could not
 /// (`lower::take_needs`), the branches whose regions hold them are widened, and so on until
-/// it translates or a branch cannot be widened. Only where a thread group is one console
-/// wave: with several, the waves of a group would decide differently and a barrier inside
-/// such a branch would wait for threads that never come.
+/// it translates or a branch cannot be widened. Where a thread group is several console
+/// waves, only with pair barriers ([`pair_meetings`]): with group barriers the waves of a
+/// group would decide differently and a barrier inside such a branch would wait for threads
+/// that never come.
 fn widen(
     c: &Container,
     native: &NativeProgram,
@@ -724,6 +753,9 @@ fn widen(
         // (a program whose waves are the host's meets no one: no barrier, any group)
         crate::native::StageIo::Cs(_) if !(native.wave64 && lower::host_max_wave() == 32) => {}
         crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64 => {}
+        // several console waves: each wave's two host waves meet only each other
+        // (`pair_meetings`), so waves that decide differently wait for no one
+        crate::native::StageIo::Cs(_) if pair_meetings() && lower::pair_meetings_on() => {}
         crate::native::StageIo::Cs(cs) => {
             if why {
                 eprintln!("WAVE64-WIDE not tried: thread groups of {:?}", cs.threads);
