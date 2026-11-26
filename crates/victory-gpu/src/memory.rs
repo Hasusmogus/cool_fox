@@ -221,13 +221,27 @@ pub(crate) struct Ready {
 
 impl Memory {
     fn new() -> Option<Memory> {
-        let host = host()?;
+        // (each step that fails says so once: the draws that need it are dropped)
+        let failed = |step: &str| tracing::warn!(step, "title memory by address: not set up");
+        let Some(host) = host() else {
+            failed("no host device");
+            return None;
+        };
         let bytes = u64::from(MEMORY_PAGES) * 8;
         // Zeroed, and watched for writes as the title's memory is.
-        let entries = crate::upload::reserve(bytes as usize)?;
-        let directory = crate::shadow::by_address(entries as u64, bytes)?;
+        let Some(entries) = crate::upload::reserve(bytes as usize) else {
+            failed("the directory's upload memory was refused");
+            return None;
+        };
+        let Some(directory) = crate::shadow::by_address(entries as u64, bytes) else {
+            failed("the directory's card copy was refused");
+            return None;
+        };
         crate::host::name(&directory.buffer, || "title memory by address: directory".into());
-        let (faults, data) = host.shared_buffer(u64::from(MEMORY_FAULTS) * 4)?;
+        let Some((faults, data)) = host.shared_buffer(u64::from(MEMORY_FAULTS) * 4) else {
+            failed("the fault notes' shared buffer was refused");
+            return None;
+        };
         crate::host::name(&faults, || "title memory by address: faults".into());
         // SAFETY: a fresh mapping of at least that many bytes.
         unsafe { std::ptr::write_bytes(data, 0, MEMORY_FAULTS as usize * 4) };

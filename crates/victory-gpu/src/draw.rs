@@ -1430,8 +1430,17 @@ impl State {
         use_: crate::memory::Use,
     ) -> Option<crate::memory::Ready> {
         let heap = match self.heaps[0] {
-            0 => None,
-            h => crate::descriptor::heap(h as This).host(),
+            0 => {
+                once!("title memory by address: no view heap is bound on the list (its draws are dropped)");
+                None
+            }
+            h => {
+                let host = crate::descriptor::heap(h as This).host();
+                if host.is_none() {
+                    once!("title memory by address: the bound view heap has no host heap (its draws are dropped)");
+                }
+                host
+            }
         }?;
         let (mut addresses, mut constants) = (Vec::new(), Vec::new());
         // (What it may write: its root views of unordered access.)
