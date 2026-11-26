@@ -46,7 +46,7 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 : "${VICTORY_INDIRECT_WINDOW:=1}" "${VICTORY_RELAY_COPY:=1}" "${VICTORY_CARD_STEPS:=2}"
 : "${VICTORY_INDIRECT_BATCH:=2}" "${VICTORY_MAP_THREADS:=1}" "${VICTORY_CARD_AWAKE:=1}"
 : "${VICTORY_SHOW_AFTER:=1}" "${VICTORY_AMBIENT:=constant:0.8}" "${VICTORY_TEXTURE_GUARD:=0}"
-: "${VICTORY_THIN:=0}" "${VICTORY_JOIN_PARTS:=0}" "${VICTORY_PORT_CONSTANTS:=1}"
+: "${VICTORY_JOIN_PARTS:=0}" "${VICTORY_PORT_CONSTANTS:=1}"
 : "${VICTORY_PORT_CBV:=1}" "${VICTORY_UPLOAD_AHEAD:=1}" "${VICTORY_LEVELS_ON_DEMAND:=1}"
 : "${VICTORY_CARD_BUFFERS_MIN_KB:=64}" "${VICTORY_LOG:=warn}"
 # The pipelines each run creates are recorded, for `play.sh warm`.
@@ -58,6 +58,11 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 : "${VICTORY_RAYS:=1}" "${VICTORY_BVH_BUILDER:=1}"
 # Hair and skinning passes: upstream skips them by name, and its list holds passes
 # characters need (CS_PreSkinSim and others). Stray strand lines remain.
+# List calls only written down on the title's threads and translated by ours
+# (45,000-60,000 a frame): 541 -> 305 ms a frame in the opening (runs 18, 19).
+# Upstream turned it off on NVIDIA for faces drawn without skin in play; the
+# opening's faces are whole here. VICTORY_THIN=0 translates inside the calls.
+: "${VICTORY_THIN:=1}"
 : "${VICTORY_HAIR:=1}"
 # (the runtime only asks whether VICTORY_HAIR is set: 0 means unset here)
 [[ "$VICTORY_HAIR" == 0 ]] && unset VICTORY_HAIR
