@@ -86,7 +86,8 @@ fn pass(host: &Host) -> Option<&'static Pass> {
         // SAFETY: the code lives through the calls; the root signature is
         // inside it.
         unsafe {
-            let root: ID3D12RootSignature = host.device.CreateRootSignature(0, &code).ok()?;
+            // As the shader's `RS`, made here: Wine's compiler embeds none.
+            let root: ID3D12RootSignature = crate::rootsig::of_source(&host.device, SCATTER, "send scatter").ok()?;
             let pso: ID3D12PipelineState = host
                 .device
                 .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {

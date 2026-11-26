@@ -4457,7 +4457,8 @@ impl Host {
         // shader.
         unsafe {
             let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
-            let root: ID3D12RootSignature = self.device.CreateRootSignature(0, bytes)?;
+            // As the shader's `RS`, made here: Wine's compiler embeds none.
+            let root: ID3D12RootSignature = crate::rootsig::of_source(&self.device, CARD_COMPARE, "card compare")?;
             let pso: ID3D12PipelineState = self.device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
                 pRootSignature: std::mem::transmute_copy(&root),
                 CS: D3D12_SHADER_BYTECODE {
@@ -11195,4 +11196,3 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert_eq!(ram_idle_ms(None), 10_000);
     }
 }
-

@@ -937,7 +937,8 @@ void main() {
                 code.GetBufferPointer().cast::<u8>(),
                 code.GetBufferSize(),
             );
-            let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
+            // As the shader's `RS`, made here: Wine's compiler embeds none.
+            let root: ID3D12RootSignature = crate::rootsig::of_source(device, source, "indirect worker")?;
             let pso = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
                 pRootSignature: std::mem::transmute_copy(&root),
                 CS: D3D12_SHADER_BYTECODE {

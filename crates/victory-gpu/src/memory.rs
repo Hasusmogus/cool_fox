@@ -219,6 +219,13 @@ pub(crate) struct Ready {
     pub(crate) base: u32,
 }
 
+/// Gives back memory [`crate::upload::reserve`] took and nothing holds.
+fn release(at: usize) {
+    use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
+    // SAFETY: a whole reservation of ours that nothing refers to.
+    unsafe { VirtualFree(at as *mut _, 0, MEM_RELEASE) };
+}
+
 impl Memory {
     fn new() -> Option<Memory> {
         // (each step that fails says so once: the draws that need it are dropped)
@@ -235,11 +242,17 @@ impl Memory {
         };
         let Some(directory) = crate::shadow::by_address(entries as u64, bytes) else {
             failed("the directory's card copy was refused");
+            // Given back: a set-up asked for again later must not take another 16 MiB of
+            // the [4 GiB, 2^37) window each time (under Wine this filled the window in
+            // minutes, and then the title's own allocations there failed).
+            release(entries);
             return None;
         };
         crate::host::name(&directory.buffer, || "title memory by address: directory".into());
         let Some((faults, data)) = host.shared_buffer(u64::from(MEMORY_FAULTS) * 4) else {
             failed("the fault notes' shared buffer was refused");
+            // (the directory's card copy goes with `directory`; its upload memory stays
+            // registered with that copy, so it is kept rather than given back)
             return None;
         };
         crate::host::name(&faults, || "title memory by address: faults".into());
@@ -919,7 +932,18 @@ pub(crate) fn ready(
 ) -> Option<Ready> {
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
+        // After a set-up that failed, the next try waits `RETRY_FRAMES` frames rather
+        // than coming with the next draw: what refused it (no card copies, a full
+        // window) rarely changes from one draw to the next.
+        static FAILED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+        const RETRY_FRAMES: u64 = 300;
+        let now = crate::frame::current();
+        let failed = FAILED_AT.load(std::sync::atomic::Ordering::Relaxed);
+        if failed != u64::MAX && now < failed + RETRY_FRAMES {
+            return None;
+        }
         *guard = Memory::new();
+        FAILED_AT.store(if guard.is_none() { now } else { u64::MAX }, std::sync::atomic::Ordering::Relaxed);
     }
     let m = guard.as_mut()?;
     let frame = crate::frame::current();
