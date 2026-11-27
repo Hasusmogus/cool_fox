@@ -138,7 +138,10 @@ impl Pending {
         let screen = (graphics.as_ref().is_some_and(|g| g.screen_pass())
             && shaders.iter().all(|s| s.stage != "mesh"))
             || scene_input;
-        let left_out = left_out(&shaders);
+        let key = key.finalize().to_hex()[..32].to_owned();
+        let left_out = left_out(&shaders).or_else(|| {
+            known_bad(&key).then_some("its driver's compiler hung or crashed on it in a warm (warm-bad.txt), left out")
+        });
         Pending {
             screen,
             scene_input,
@@ -149,7 +152,7 @@ impl Pending {
             queue_state: AtomicU8::new(NOT_QUEUED),
             was_slow: AtomicBool::new(false),
             made: OnceLock::new(),
-            key: key.finalize().to_hex()[..32].to_owned(),
+            key,
             used: AtomicBool::new(false),
             reported_pending: AtomicBool::new(false),
             waited_us: AtomicU64::new(0),
@@ -335,11 +338,13 @@ fn wait_once() -> bool {
 }
 
 /// Pipelines a warm found its driver hangs or crashes on (`warm-bad.txt` in the
-/// pipeline cache folder, their keys first on each line): never waited for. One
-/// of them (a compute pipeline NVIDIA's compiler does not finish in minutes) was
-/// first asked for in the opening's cutscene after 46 s of compiling, and that
-/// frame waited half a second for it (run 35). `VICTORY_PIPELINE_WAIT_BAD=1`:
-/// waited for like the others.
+/// pipeline cache folder, their keys first on each line): left out, neither
+/// compiled nor waited for. One of them (a compute pipeline NVIDIA's compiler
+/// does not finish in minutes) was first asked for in the opening's cutscene
+/// after 46 s of compiling, and that frame waited half a second for it (run
+/// 35); its compile kept one of the processor's cores busy for the whole run
+/// (the driver's compiler 10.6% of all samples in the cutscene, run 39).
+/// `VICTORY_PIPELINE_WAIT_BAD=1`: made and waited for like the others.
 fn known_bad(key: &str) -> bool {
     static BAD: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
     BAD.get_or_init(|| {
