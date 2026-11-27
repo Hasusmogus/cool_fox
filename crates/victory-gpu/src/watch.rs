@@ -619,6 +619,21 @@ impl Drop for Asking {
     }
 }
 
+/// Pages of write-watched memory asked about in one call, if asked in
+/// pieces: `VICTORY_WATCH_CHUNK_MB` (8 by default under Wine, whose answer
+/// holds its lock for all of memory; 0, and on Windows by default: one call
+/// for the whole range, as before). From upstream (Hasusmogus, PR #71).
+fn watch_chunk() -> Option<usize> {
+    static CHUNK: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *CHUNK.get_or_init(|| {
+        let mb = std::env::var("VICTORY_WATCH_CHUNK_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(if crate::host::under_wine() { 8 } else { 0 });
+        (mb > 0).then_some((mb << 20) / PAGE)
+    })
+}
+
 thread_local! {
     /// Room for the kernel's answer.
     static FOUND: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -697,18 +712,37 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
         let mut granularity = 0;
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
+        // Asked in pieces of at most `chunk` pages: Wine answers with its
+        // one lock for all of memory held, through the whole range (12 ms
+        // for some of the title's heaps), and every fault, protection change
+        // and question about memory of every thread waits behind it.
         let keep = no_reset();
-        // SAFETY: the answer buffer holds `count` entries.
-        let failed = unsafe {
-            GetWriteWatch(
-                if keep { 0 } else { WRITE_WATCH_FLAG_RESET },
-                (first * PAGE) as *const _,
-                (last - first) * PAGE,
-                found.as_mut_ptr().cast(),
-                &mut count,
-                &mut granularity,
-            )
-        } != 0;
+        let chunk = watch_chunk().unwrap_or(last - first).max(1);
+        let mut failed = false;
+        let mut filled = 0;
+        let mut from = first;
+        while from < last {
+            let to = (from + chunk).min(last);
+            let mut n = count - filled;
+            // SAFETY: the answer buffer holds `count` entries, `filled` of
+            // them used.
+            failed = unsafe {
+                GetWriteWatch(
+                    if keep { 0 } else { WRITE_WATCH_FLAG_RESET },
+                    (from * PAGE) as *const _,
+                    (to - from) * PAGE,
+                    found.as_mut_ptr().add(filled).cast(),
+                    &mut n,
+                    &mut granularity,
+                )
+            } != 0;
+            if failed {
+                break;
+            }
+            filled += n;
+            from = to;
+        }
+        count = filled;
         #[cfg(feature = "diagnostics")]
         {
             tally(10, u64::from(failed));

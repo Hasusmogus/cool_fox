@@ -67,6 +67,9 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 # the new one has uploaded (default 1: only the same kind). Without it faces in the diner
 # cutscene showed coloured dots ("confetti") while their textures were mid-upload (runs 94/95).
 : "${VICTORY_KEEP_SHOWN:=2}"
+# Write watches asked in one call per range (upstream asks Wine in 8 MB pieces): ~1 ms a frame
+# less here (run 114 against 113).
+: "${VICTORY_WATCH_CHUNK_MB:=0}"
 # Textures are guarded (a write faults once and is noted) instead of hashed whole at every
 # check: ~10 ms less preparing a frame (run 106: textures 138 -> 15 MB, 8 -> 2 ms). The diner
 # confetti comes and goes with it on or off (run 110 had it off), so it is not the guard's.
