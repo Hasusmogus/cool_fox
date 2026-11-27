@@ -107,6 +107,11 @@ mkdir -p "$WORK"; cd "$WORK"   # vkd3d-proton keeps vkd3d-proton.cache in the wo
 # serves the prefix: Wine connects to a running server rather than starting its own.
 # PATCHED_SERVER=0: the system's.
 SERVER="${PATCHED_SERVER_PATH:-$WORK/wine-build/build64/server/wineserver}"
+if [[ -x "$SERVER" && -f "$WORK/wine-build/wine-version.txt" \
+      && "$(cat "$WORK/wine-build/wine-version.txt")" != "$(wine --version)" ]]; then
+  echo "warning: the patched wineserver was built for $(cat "$WORK/wine-build/wine-version.txt"), not $(wine --version): using the stock one (run linux/build-wineserver.sh again)" >&2
+  PATCHED_SERVER=0
+fi
 if [[ "${PATCHED_SERVER:-1}" != 0 && -x "$SERVER" ]]; then
   wineserver -k 2>/dev/null || true
   "$SERVER" -k 2>/dev/null || true
