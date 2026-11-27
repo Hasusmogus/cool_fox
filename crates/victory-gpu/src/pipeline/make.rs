@@ -334,8 +334,40 @@ fn wait_once() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_ONCE").is_none_or(|v| v != "0"))
 }
 
+/// Pipelines a warm found its driver hangs or crashes on (`warm-bad.txt` in the
+/// pipeline cache folder, their keys first on each line): never waited for. One
+/// of them (a compute pipeline NVIDIA's compiler does not finish in minutes) was
+/// first asked for in the opening's cutscene after 46 s of compiling, and that
+/// frame waited half a second for it (run 35). `VICTORY_PIPELINE_WAIT_BAD=1`:
+/// waited for like the others.
+fn known_bad(key: &str) -> bool {
+    static BAD: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    BAD.get_or_init(|| {
+        if std::env::var_os("VICTORY_PIPELINE_WAIT_BAD").is_some_and(|v| v != "0") {
+            return Default::default();
+        }
+        let Some(file) = super::library::folder().map(|d| d.join("warm-bad.txt")) else {
+            return Default::default();
+        };
+        let bad: std::collections::HashSet<String> = std::fs::read_to_string(&file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.split_whitespace().next())
+            .map(str::to_owned)
+            .collect();
+        if !bad.is_empty() {
+            tracing::info!(count = bad.len(), "pipelines a warm found its driver hangs on: not waited for");
+        }
+        bad
+    })
+    .contains(key)
+}
+
 /// Waits for `p` while frame `frame` has budget left.
 fn wait(p: &Pending, frame: u64) {
+    if known_bad(&p.key) {
+        return;
+    }
     let screen = p.screen && screens_first();
     let budget = if screen { screen_budget() } else { wait_budget() };
     if budget.is_zero() {
