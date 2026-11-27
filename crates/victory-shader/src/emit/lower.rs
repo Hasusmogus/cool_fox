@@ -1185,8 +1185,9 @@ fn own_bits_on() -> bool {
 /// What the translator was told of the host, for a cache's key: the widest
 /// wave, the view heap's limit, where the raw twins of its views start, and
 /// what it writes for the console's own hardware.
-pub fn host_settings() -> [u32; 4] {
-    [host_max_wave(), super::shader::view_heap_limit(), super::shader::raw_views(), host_rdna()]
+pub fn host_settings() -> [u32; 5] {
+    // The last one: `VICTORY_BVH_MISS` (every ray-tracing node test misses) is part of the translation.
+    [host_max_wave(), super::shader::view_heap_limit(), super::shader::raw_views(), host_rdna(), u32::from(intersect::bvh_miss())]
 }
 
 static HOST_RDNA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
