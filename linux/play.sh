@@ -70,6 +70,9 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 # Write watches asked in one call per range (upstream asks Wine in 8 MB pieces): ~1 ms a frame
 # less here (run 114 against 113).
 : "${VICTORY_WATCH_CHUNK_MB:=0}"
+# The heaps' records thread makes a round of its own after 1 ms without a submission (default 4),
+# so less is left for the submission to wait for: run 115, 44.6 -> 43.3 ms a frame.
+: "${VICTORY_HEAP_SYNC_EARLY:=1}"
 # Textures are guarded (a write faults once and is noted) instead of hashed whole at every
 # check: ~10 ms less preparing a frame (run 106: textures 138 -> 15 MB, 8 -> 2 ms). The diner
 # confetti comes and goes with it on or off (run 110 had it off), so it is not the guard's.
