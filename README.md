@@ -87,7 +87,13 @@ Tried and left off by default because they measured neutral or worse here: Kelva
 ## Quick start
 
 Full setup (Wine prefix, vkd3d-proton, DXVK's dxgi, `d3dcompiler_47`, the patched wineserver) is in
-**[linux/README.md](linux/README.md)**. In short:
+**[linux/README.md](linux/README.md)**. 
+**Prebuilt download:** every [release](https://github.com/dfmbrollins/victory-linux-nvidia/releases)
+carries `victory-linux-nvidia-<version>.tar.gz`: `victory.exe` already built, plus `linux/play.sh`, the
+tools and the wineserver patch. Unpack it, skip step 1 below, and run the same `linux/play.sh` commands
+from inside the unpacked folder. You still need your own dump, and you still run `shaders` and `warm` once.
+
+Building from source, in short:
 
 ```sh
 # 1. Build (cross-compiled to Windows with cargo-xwin)

@@ -91,7 +91,10 @@ if [[ "${AUTO_A:-0}" == 1 && -z "${VICTORY_KEYS:-}" ]]; then
 fi
 # BUILD=release (default) or diag (cargo xwin build --profile diag --features diagnostics).
 EXE="$REPO/target/x86_64-pc-windows-msvc/${BUILD:-release}/victory.exe"
-cd "$WORK"   # vkd3d-proton keeps vkd3d-proton.cache in the working folder
+# A release download keeps victory.exe next to linux/ instead of under target/.
+if [[ ! -f "$EXE" && -f "$REPO/victory.exe" ]]; then EXE="$REPO/victory.exe"; fi
+EXE="${VICTORY_EXE:-$EXE}"
+mkdir -p "$WORK"; cd "$WORK"   # vkd3d-proton keeps vkd3d-proton.cache in the working folder
 
 # A wineserver whose per-process views are in a tree rather than a list
 # (linux/wine/0001-*.patch, built into $WORK/wine-build): the title maps and unmaps
