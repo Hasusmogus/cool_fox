@@ -87,7 +87,8 @@ elif [[ ! -f "$SYS/d3d12core.dll" ]]; then
 fi
 # Microsoft's HLSL compiler (Wine's own lacks what the runtime's shaders need).
 # It cannot be redistributed: winetricks fetches it from Microsoft.
-if [[ ! -f "$SYS/d3dcompiler_47.dll" ]]; then
+# A new prefix holds Wine's own placeholder of it ("Wine builtin DLL"), not Microsoft's.
+if [[ ! -f "$SYS/d3dcompiler_47.dll" ]] || grep -q "Wine builtin DLL" "$SYS/d3dcompiler_47.dll"; then
   command -v winetricks >/dev/null || die "winetricks is needed once, to install d3dcompiler_47. Install it with your package manager and run ./start.sh again."
   say "Installing d3dcompiler_47 with winetricks (first launch only)..."
   winetricks -q d3dcompiler_47 >/dev/null 2>&1 || die "winetricks d3dcompiler_47 failed; run 'WINEPREFIX=$WINEPREFIX winetricks d3dcompiler_47' to see why."
@@ -106,8 +107,15 @@ EXE="$REPO/victory.exe"; [[ -f "$EXE" ]] || EXE="$REPO/target/x86_64-pc-windows-
 stamp="$(sha256sum "$EXE" | cut -c1-16)"
 if [[ "$(cat "$WORK/.shaders-done" 2>/dev/null)" != "$stamp" ]]; then
   say "Translating the game's shaders (once per version; this can take several minutes)..."
-  "$PLAY" shaders "Z:${DUMP//\//\\}\\shaders.rpf" 2>&1 | grep -vE 'MESA|pci id|^info:|^warn:|fixme' | tail -5
-  echo "$stamp" > "$WORK/.shaders-done"
+  log="$WORK/shaders.log"
+  if "$PLAY" shaders "Z:${DUMP//\//\\}\\shaders.rpf" > "$log" 2>&1; then
+    grep -vE 'MESA|pci id|dri2|^info:|^warn:|fixme' "$log" | tail -3
+    echo "$stamp" > "$WORK/.shaders-done"
+  else
+    status=$?
+    grep -E 'err:module|error|Error|panicked' "$log" | tail -5 >&2 || true
+    die "translating the shaders failed (exit $status); the whole output is in $log"
+  fi
 fi
 
 # --- Pipelines found by earlier runs -------------------------------------------------
