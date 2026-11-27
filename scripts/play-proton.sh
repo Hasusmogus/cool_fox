@@ -60,6 +60,9 @@ export VICTORY_LOG_FILE
 # VICTORY_GUARD_REST=50000 (50 ms, 3 by default): a change of protection costs
 # far more under Wine (Wine's lock, every core's TLB); a block the title just
 # wrote rests longer: blocks made read-only a frame 861 -> 461, faults 478 -> 364.
+# VICTORY_WC_NO_BACK=1 with VICTORY_WC_NO_BACK_MIN_KB=1024 (as VIctory-NVIDIA's launcher): what
+# shaders write into big write-combined title memory, which the title's CPU does not read,
+# stays on the card (RTX 5060 prologue: copying back 27 -> 11 ms a frame, preparing 79 -> 67).
 for setting in \
     VICTORY_AMBIENT_AIR=1.5 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_RELAY=2 VICTORY_WIDE_BACK=1 \
     VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1 VICTORY_RELAY_COPY=1 \
@@ -67,7 +70,8 @@ for setting in \
     VICTORY_SHOW_AFTER=1 VICTORY_AMBIENT=1 VICTORY_THIN=0 VICTORY_JOIN_PARTS=0 \
     VICTORY_TEXTURE_GUARD=0 VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_CBV=1 \
     VICTORY_UPLOAD_AHEAD=1 VICTORY_LEVELS_ON_DEMAND=1 VICTORY_CARD_BUFFERS_MIN_KB=64 \
-    VICTORY_COMMITTED_QUERY=1 VICTORY_HAIR=1 VICTORY_GUARD_REST=50000 VICTORY_POKE=71b6330:1; do
+    VICTORY_COMMITTED_QUERY=1 VICTORY_HAIR=1 VICTORY_GUARD_REST=50000 VICTORY_POKE=71b6330:1 \
+    VICTORY_WC_NO_BACK=1 VICTORY_WC_NO_BACK_MIN_KB=1024; do
     name=${setting%%=*}
     [[ -n ${!name:-} ]] || export "$setting"
 done

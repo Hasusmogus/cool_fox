@@ -134,3 +134,4 @@ pub use watch::{
     title_memory_remapping, title_memory_splitting, title_memory_unmapping, title_memory_written, title_placeholder_reserved,
     writing as kernel_will_write,
 };
+pub use shadow::title_memory_write_combined;
