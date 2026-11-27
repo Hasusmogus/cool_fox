@@ -13,10 +13,10 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::too_many_arguments)]
 
-use std::ffi::{CStr, c_char, c_void};
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::ffi::{CStr, OsString, c_char, c_void};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use windows_sys::Win32::Globalization::{CP_ACP, MultiByteToWideChar};
 use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
@@ -107,6 +107,67 @@ const VERBATIM: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u1
 /// host's MAX_PATH limit (248 characters for a directory, 260 for a file).
 const LONG: usize = 248;
 
+/// Redirect only read opens of named package files. File enumeration and
+/// writable paths keep their original names and normal host semantics.
+struct ReadView {
+    source: PathBuf,
+    leaf: Vec<u16>,
+    cache: Vec<u16>,
+}
+static READ_VIEWS: OnceLock<Vec<ReadView>> = OnceLock::new();
+
+pub fn set_package_read_views(paths: &[(PathBuf, PathBuf)]) -> std::io::Result<()> {
+    let views = paths
+        .iter()
+        .map(|(source, cache)| {
+            let source = source.canonicalize()?;
+            let leaf = source
+                .file_name()
+                .unwrap_or_default()
+                .encode_wide()
+                .collect();
+            let cache = cache
+                .canonicalize()?
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect();
+            Ok(ReadView {
+                source,
+                leaf,
+                cache,
+            })
+        })
+        .collect::<std::io::Result<_>>()?;
+    READ_VIEWS
+        .set(views)
+        .map_err(|_| std::io::Error::other("package read views already mounted"))
+}
+
+fn same_leaf(a: &[u16], b: &[u16]) -> bool {
+    let fold = |c: u16| if (65..=90).contains(&c) { c + 32 } else { c };
+    a.len() == b.len() && a.iter().zip(b).all(|(&a, &b)| fold(a) == fold(b))
+}
+
+fn read_view(path: &[u16], views: &[ReadView]) -> Option<Vec<u16>> {
+    let leaf = path.rsplit(|c| SEPARATORS.contains(c)).next()?;
+    let view = views.iter().find(|v| same_leaf(leaf, &v.leaf))?;
+    let source = PathBuf::from(OsString::from_wide(path))
+        .canonicalize()
+        .ok()?;
+    (source == view.source).then(|| view.cache.clone())
+}
+
+fn file_read(access: u32, disposition: u32, flags: u32) -> bool {
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_DELETE_ON_CLOSE, FILE_GENERIC_READ, OPEN_EXISTING,
+    };
+    disposition == OPEN_EXISTING
+        && flags & FILE_FLAG_DELETE_ON_CLOSE == 0
+        && access & !(GENERIC_READ | FILE_GENERIC_READ) == 0
+}
+
 /// `root` and the title's `tail` as a `\\?\` path. That form turns off the
 /// host's own clean-up, so `/` becomes `\` and `.` and `..` are resolved
 /// here (`..` stops at the root).
@@ -194,6 +255,10 @@ impl Wide {
 }
 
 fn wide(path: *const u16) -> Wide {
+    wide_open(path, false)
+}
+
+fn wide_open(path: *const u16, reading: bool) -> Wide {
     if path.is_null() {
         return Wide(path, None);
     }
@@ -202,9 +267,20 @@ fn wide(path: *const u16) -> Wide {
         let len = (0..).take_while(|&i| *path.add(i) != 0).count();
         std::slice::from_raw_parts(path, len)
     };
-    let host = translate(path_slice);
+    let host = open_path(path_slice, reading);
     trace(path_slice, host.as_deref());
     Wide(path, host)
+}
+
+fn open_path(path: &[u16], reading: bool) -> Option<Vec<u16>> {
+    let host = translate(path);
+    if reading && let Some(views) = READ_VIEWS.get() {
+        let translated = host.as_ref().map_or(path, |p| &p[..p.len() - 1]);
+        if let Some(view) = read_view(translated, views) {
+            return Some(view);
+        }
+    }
+    host
 }
 
 /// Every title path at debug level, with the host path if rewritten.
@@ -219,6 +295,10 @@ fn trace(path: &[u16], host: Option<&[u16]>) {
 /// A narrow path (ANSI code page, as the host decodes it) on a virtual
 /// drive, as a wide host path.
 fn narrow(path: *const c_char) -> Option<Vec<u16>> {
+    narrow_open(path, false)
+}
+
+fn narrow_open(path: *const c_char, reading: bool) -> Option<Vec<u16>> {
     if path.is_null() {
         return None;
     }
@@ -227,6 +307,7 @@ fn narrow(path: *const c_char) -> Option<Vec<u16>> {
     // The drive part is ASCII in every code page; decode only candidates.
     match bytes.strip_prefix(br"\\?\").unwrap_or(bytes) {
         [letter, b':', ..] if letter.is_ascii_alphabetic() => {}
+        _ if reading && READ_VIEWS.get().is_some() => {}
         _ => {
             tracing::debug!(path = %String::from_utf8_lossy(bytes), "title path");
             return None;
@@ -240,7 +321,7 @@ fn narrow(path: *const c_char) -> Option<Vec<u16>> {
         MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), n);
         wide
     };
-    let host = translate(&wide);
+    let host = open_path(&wide, reading);
     trace(&wide, host.as_deref());
     host
 }
@@ -269,7 +350,7 @@ pub extern "system" fn CreateFileW(
     flags: u32,
     template: Handle,
 ) -> Handle {
-    let p = wide(path);
+    let p = wide_open(path, file_read(access, disposition, flags));
     host!("kernel32.dll", "CreateFileW": extern "system" fn(*const u16, u32, u32, *const c_void, u32, u32, Handle) -> Handle)(
         p.ptr(),
         access,
@@ -290,7 +371,7 @@ pub extern "system" fn CreateFileA(
     flags: u32,
     template: Handle,
 ) -> Handle {
-    match narrow(path) {
+    match narrow_open(path, file_read(access, disposition, flags)) {
         Some(p) => {
             host!("kernel32.dll", "CreateFileW": extern "system" fn(*const u16, u32, u32, *const c_void, u32, u32, Handle) -> Handle)(
                 p.as_ptr(),
@@ -324,7 +405,11 @@ pub extern "system" fn CreateFile2(
     disposition: u32,
     params: *const c_void,
 ) -> Handle {
-    let p = wide(path);
+    use windows_sys::Win32::Storage::FileSystem::CREATEFILE2_EXTENDED_PARAMETERS;
+    // SAFETY: optional extended parameters have the Win32 CreateFile2 ABI.
+    let flags = unsafe { params.cast::<CREATEFILE2_EXTENDED_PARAMETERS>().as_ref() }
+        .map_or(0, |p| p.dwFileFlags);
+    let p = wide_open(path, file_read(access, disposition, flags));
     host!("kernel32.dll", "CreateFile2": extern "system" fn(*const u16, u32, u32, u32, *const c_void) -> Handle)(
         p.ptr(),
         access,
@@ -498,13 +583,43 @@ pub extern "system" fn SetCurrentDirectoryA(path: *const c_char) -> i32 {
 
 // The C runtime (ucrtbase, which the title's CRT imports bind to).
 
+fn crt_read<T: Copy + Into<i32>>(mode: *const T) -> bool {
+    if mode.is_null() || READ_VIEWS.get().is_none() {
+        return false;
+    }
+    // SAFETY: fopen takes a NUL-terminated mode, in either character width.
+    unsafe {
+        if (*mode).into() != i32::from(b'r') {
+            return false;
+        }
+        let mut next = mode.add(1);
+        loop {
+            match (*next).into() {
+                0 => return true,
+                43 => return false,
+                _ => next = next.add(1),
+            }
+        }
+    }
+}
+
+fn descriptor_read(flags: i32) -> bool {
+    // _O_WRONLY, _O_RDWR, _O_APPEND, _O_TEMPORARY, _O_CREAT, _O_TRUNC, _O_EXCL.
+    flags & (3 | 8 | 0x40 | 0x100 | 0x200 | 0x400) == 0
+}
+
+fn stream_read(mode: i32) -> bool {
+    // MSVC ios_base::in with none of out, app or trunc.
+    mode & (1 | 2 | 8 | 16) == 1
+}
+
 pub extern "C" fn _wfopen(path: *const u16, mode: *const u16) -> File {
-    let p = wide(path);
+    let p = wide_open(path, crt_read(mode));
     host!("ucrtbase.dll", "_wfopen": extern "C" fn(*const u16, *const u16) -> File)(p.ptr(), mode)
 }
 
 pub extern "C" fn _wfopen_s(out: *mut File, path: *const u16, mode: *const u16) -> i32 {
-    let p = wide(path);
+    let p = wide_open(path, crt_read(mode));
     host!("ucrtbase.dll", "_wfopen_s": extern "C" fn(*mut File, *const u16, *const u16) -> i32)(
         out,
         p.ptr(),
@@ -513,7 +628,7 @@ pub extern "C" fn _wfopen_s(out: *mut File, path: *const u16, mode: *const u16) 
 }
 
 pub extern "C" fn _wfsopen(path: *const u16, mode: *const u16, share: i32) -> File {
-    let p = wide(path);
+    let p = wide_open(path, crt_read(mode));
     host!("ucrtbase.dll", "_wfsopen": extern "C" fn(*const u16, *const u16, i32) -> File)(
         p.ptr(),
         mode,
@@ -577,7 +692,7 @@ pub extern "C" fn fread(buffer: *mut u8, size: usize, count: usize, stream: File
 }
 
 pub extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> File {
-    match narrow(path) {
+    match narrow_open(path, crt_read(mode)) {
         Some(p) => host!("ucrtbase.dll", "_wfopen": extern "C" fn(*const u16, *const u16) -> File)(
             p.as_ptr(),
             widen(mode).as_ptr(),
@@ -591,7 +706,7 @@ pub extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> File {
 }
 
 pub extern "C" fn fopen_s(out: *mut File, path: *const c_char, mode: *const c_char) -> i32 {
-    match narrow(path) {
+    match narrow_open(path, crt_read(mode)) {
         Some(p) => {
             host!("ucrtbase.dll", "_wfopen_s": extern "C" fn(*mut File, *const u16, *const u16) -> i32)(
                 out,
@@ -610,7 +725,7 @@ pub extern "C" fn fopen_s(out: *mut File, path: *const c_char, mode: *const c_ch
 /// `_open(path, flags[, mode])` is variadic; on x64 the optional integer
 /// travels in the same register either way, so it is passed on as is.
 pub extern "C" fn _open(path: *const c_char, flags: i32, mode: i32) -> i32 {
-    match narrow(path) {
+    match narrow_open(path, descriptor_read(flags)) {
         Some(p) => host!("ucrtbase.dll", "_wopen": extern "C" fn(*const u16, i32, i32) -> i32)(
             p.as_ptr(),
             flags,
@@ -624,7 +739,7 @@ pub extern "C" fn _open(path: *const c_char, flags: i32, mode: i32) -> i32 {
 
 /// See [`_open`]; used by libHttpClient.
 pub extern "C" fn _wopen(path: *const u16, flags: i32, mode: i32) -> i32 {
-    let p = wide(path);
+    let p = wide_open(path, descriptor_read(flags));
     host!("ucrtbase.dll", "_wopen": extern "C" fn(*const u16, i32, i32) -> i32)(
         p.ptr(),
         flags,
@@ -680,7 +795,7 @@ const FIOPEN_WIDE: &str = "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z";
 
 /// `_Fiopen(const wchar_t* path, ios_base::openmode, int protection)`.
 extern "C" fn fiopen_wide(path: *const u16, mode: i32, protection: i32) -> File {
-    let p = wide(path);
+    let p = wide_open(path, stream_read(mode));
     host!("msvcp140.dll", "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z": extern "C" fn(*const u16, i32, i32) -> File)(
         p.ptr(),
         mode,
@@ -690,7 +805,7 @@ extern "C" fn fiopen_wide(path: *const u16, mode: i32, protection: i32) -> File 
 
 /// `_Fiopen(const char* path, ios_base::openmode, int protection)`.
 extern "C" fn fiopen(path: *const c_char, mode: i32, protection: i32) -> File {
-    match narrow(path) {
+    match narrow_open(path, stream_read(mode)) {
         Some(p) => {
             host!("msvcp140.dll", "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z": extern "C" fn(*const u16, i32, i32) -> File)(
                 p.as_ptr(),
@@ -770,6 +885,55 @@ mod tests {
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().chain([0]).collect()
+    }
+
+    #[test]
+    fn package_read_views_are_shared_by_win32_and_crt_but_not_writable_opens() {
+        use std::io::Read;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, OPEN_EXISTING};
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("prompts.bin");
+        let cached = dir.path().join("view.bin");
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::write(&cached, b"cache").unwrap();
+        set_package_read_views(&[(original.clone(), cached)]).unwrap();
+        let drive = mount(dir.path()).unwrap();
+        let name = w(&format!("{drive}:/./PROMPTS.BIN"));
+        let read = |access| {
+            let handle = CreateFileW(
+                name.as_ptr(),
+                access,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE);
+            // SAFETY: CreateFileW returned a new valid handle.
+            let mut file = unsafe { std::fs::File::from_raw_handle(handle) };
+            let mut result = Vec::new();
+            file.read_to_end(&mut result).unwrap();
+            result
+        };
+        assert_eq!(read(GENERIC_READ), b"cache");
+        assert_eq!(read(GENERIC_READ | GENERIC_WRITE), b"original");
+        let ansi = std::ffi::CString::new(format!("{drive}:/prompts.bin")).unwrap();
+        let fclose = host!("ucrtbase.dll","fclose": extern "C" fn(File) -> i32);
+        for (mode, expected) in [
+            (c"rb", b"cache".as_slice()),
+            (c"r+b", b"original".as_slice()),
+        ] {
+            let file = fopen(ansi.as_ptr(), mode.as_ptr());
+            assert!(!file.is_null());
+            let mut buf = [0; 16];
+            let count = fread(buf.as_mut_ptr().cast(), 1, buf.len(), file);
+            fclose(file);
+            assert_eq!(&buf[..count], expected);
+        }
+        assert_eq!(std::fs::read(original).unwrap(), b"original");
     }
 
     #[test]

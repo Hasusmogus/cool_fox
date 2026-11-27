@@ -22,6 +22,16 @@ use crate::{HleExport, HleModule};
 #[cfg(windows)]
 mod dualsense;
 
+/// The title caches prompt artwork when it opens the package.
+#[cfg(windows)]
+pub fn dualsense_prompts() -> bool {
+    match std::env::var("VICTORY_DUALSENSE_PROMPTS").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => dualsense::connected(),
+    }
+}
+
 /// The documented errors.
 pub const DEVICE_DISCONNECTED: HRESULT = 0x838A_0001_u32 as i32;
 pub const DEVICE_NOT_FOUND: HRESULT = 0x838A_0002_u32 as i32;
@@ -1565,6 +1575,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Sony DualSense connected over USB or Bluetooth"]
     fn connected_dualsense_delivers_a_gameinput_reading() {
+        assert!(dualsense::connected(), "active DualSense artwork probe");
         let hub = Hub::new(host(), false);
         let start = Instant::now();
         let slot = loop {

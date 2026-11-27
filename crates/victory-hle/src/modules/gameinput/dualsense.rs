@@ -15,6 +15,45 @@ const SONY: u16 = 0x054c;
 const DUALSENSE: u16 = 0x0ce6;
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
+fn gamepad(info: &hidapi::DeviceInfo) -> bool {
+    info.vendor_id() == SONY
+        && info.product_id() == DUALSENSE
+        && info.usage_page() == 0x01
+        && info.usage() == 0x05
+}
+
+/// Windows can still enumerate and open a paired Bluetooth pad after power-off.
+/// Select its artwork only after the input backend can decode a live report.
+pub(super) fn connected() -> bool {
+    let Ok(api) = HidApi::new() else { return false };
+    let devices: Vec<_> = api
+        .device_list()
+        .filter(|info| gamepad(info))
+        .filter_map(|info| info.open_device(&api).ok())
+        .collect();
+    if devices.is_empty() {
+        return false;
+    }
+
+    // One startup deadline for all candidates. A remembered pad must not
+    // delay detection of an active one on another HID interface.
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut report = [0; 78];
+    loop {
+        if devices.iter().any(|pad| {
+            pad.read_timeout(&mut report, 0)
+                .is_ok_and(|len| decode(&report[..len]).is_some())
+        }) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::sleep(remaining.min(super::POLL));
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Controllers {
     slots: [Option<Controller>; DUALSENSE_PADS],
@@ -60,12 +99,7 @@ impl Controllers {
     fn update_devices(&mut self, api: &HidApi) {
         let devices: Vec<_> = api
             .device_list()
-            .filter(|info| {
-                info.vendor_id() == SONY
-                    && info.product_id() == DUALSENSE
-                    && info.usage_page() == 0x01
-                    && info.usage() == 0x05
-            })
+            .filter(|info| gamepad(info))
             .collect();
         for slot in &mut self.slots {
             if let Some(pad) = slot
@@ -244,6 +278,14 @@ fn rumble_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a powered-off DualSense that Windows still lists as a HID gamepad"]
+    fn paired_but_powered_off_pad_does_not_select_playstation_artwork() {
+        let api = HidApi::new().unwrap();
+        assert!(api.device_list().any(gamepad), "no paired HID gamepad");
+        assert!(!connected());
+    }
 
     #[test]
     fn usb_and_both_bluetooth_modes_give_the_same_reading() {

@@ -254,6 +254,13 @@ XInput pads and Sony DualSense controllers feed the same in-game pad by default.
 DualSense works over USB and Bluetooth. The keyboard also controls that pad
 while the title's window has focus.
 
+At launch, VIctory checks for a live USB or Bluetooth report from a DualSense.
+An active controller selects PlayStation button prompts and the DualSense diagram
+in the controls menu for supported packages. A powered-off controller selects Xbox artwork.
+VIctory builds two read-only views in its cache (about 460 MiB for 1.0.2.1).
+The game's original files stay in place. Set `VICTORY_DUALSENSE_PROMPTS=0`
+for Xbox artwork or `1` to force PlayStation artwork at the next launch.
+
 | Keys | Pad |
 |------|-----|
 | W A S D / I J K L | left / right stick |

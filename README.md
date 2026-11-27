@@ -79,6 +79,12 @@ $env:VICTORY_GAME_DIR = 'D:\path\to\your\title'
 .\Play-VIctory.cmd
 ```
 
+A live input report from a USB or Bluetooth DualSense at launch selects PlayStation
+button prompts and the controller diagram in Settings. A paired controller
+that is switched off uses the original Xbox artwork. VIctory reads the
+original package and stores its two UI files in the VIctory cache. Set
+`VICTORY_DUALSENSE_PROMPTS=0` for Xbox artwork or `1` to force PlayStation artwork.
+
 For AMD Radeon GPUs (RX 7000+, 16 GB+ VRAM) with all renderer ports enabled:
 
 ```powershell
