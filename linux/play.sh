@@ -45,7 +45,7 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 : "${VICTORY_WIDE_BACK:=1}" "${VICTORY_CARD_REHASH_RUNS:=1}" "${VICTORY_JOIN_COPIES:=1}"
 : "${VICTORY_INDIRECT_WINDOW:=1}" "${VICTORY_RELAY_COPY:=1}" "${VICTORY_CARD_STEPS:=2}"
 : "${VICTORY_INDIRECT_BATCH:=2}" "${VICTORY_MAP_THREADS:=1}" "${VICTORY_CARD_AWAKE:=1}"
-: "${VICTORY_SHOW_AFTER:=1}" "${VICTORY_AMBIENT:=1}" "${VICTORY_TEXTURE_GUARD:=0}"
+: "${VICTORY_SHOW_AFTER:=1}" "${VICTORY_AMBIENT:=1}" "${VICTORY_TEXTURE_GUARD:=1}"
 : "${VICTORY_JOIN_PARTS:=0}" "${VICTORY_PORT_CONSTANTS:=1}"
 : "${VICTORY_PORT_CBV:=1}" "${VICTORY_UPLOAD_AHEAD:=1}" "${VICTORY_LEVELS_ON_DEMAND:=0}"
 : "${VICTORY_CARD_BUFFERS_MIN_KB:=64}" "${VICTORY_LOG:=warn}"
@@ -59,6 +59,10 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 # the new one has uploaded (default 1: only the same kind). Without it faces in the diner
 # cutscene showed coloured dots ("confetti") while their textures were mid-upload (runs 94/95).
 : "${VICTORY_KEEP_SHOWN:=2}"
+# Textures are guarded (a write faults once and is noted) instead of hashed whole at every
+# check: upstream's Windows script turned the guard off for colour noise on a phone and skin,
+# which the hot-texture rehash (VICTORY_TEXTURE_HOT) now covers. Run 106: textures 138 -> 15 MB
+# and 8 -> 2 ms a frame, preparing 46 -> 36 ms, frame 49 -> 47 ms (0 MB of the hashed changed).
 # Vice-Tay's memory profile for 10-14 GB NVIDIA cards: more title buffers and windows in
 # the card's memory (110-120 -> 58 ms a frame steady; copy-back 38 -> 15 ms).
 : "${VICTORY_CARD_BUFFERS_MB:=1536}" "${VICTORY_CARD_WINDOWS_MB:=1024}"
