@@ -10,6 +10,12 @@ same scene before it was kept.
 > **No game files are included or distributed.** You need your own legal dump of the game.
 > Never download a prebuilt "GTA VI PC" package: build from source.
 
+[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/danf490581)
+
+Development runs on paid AI tokens and long test sessions. If you'd like to help cover those costs,
+you can [support the work on Ko-fi](https://ko-fi.com/danf490581). Everything here is and stays free:
+donations buy nothing but time spent on the next fix.
+
 ---
 
 ## Where it stands
