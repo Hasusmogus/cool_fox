@@ -101,10 +101,12 @@ pub(crate) const RADIANCE: (u8, u32) = (1, 16);
 /// Where the light the air scatters is.
 pub(crate) const AIR: (u8, u32) = (1, 32);
 /// Where the miss program writes the reflected light (R11G11B10, half the
-/// picture's size) and where it reads the depth it is given (a 32-bit depth
-/// of the picture's size).
+/// picture's size) and where it reads the depth it is given. In this branch's
+/// translation that is (1, 96): R32_FLOAT of the image's size (run 98: every
+/// texture the program reads, by `translate_one` with USED=1); VIctory-NVIDIA's
+/// (0, 1000) holds a 1x1 R8G8B8A8 placeholder here.
 pub(crate) const MISS_LIGHT: (u8, u32) = (1, 104);
-pub(crate) const MISS_DEPTH: (u8, u32) = (0, 1000);
+pub(crate) const MISS_DEPTH: (u8, u32) = (1, 96);
 /// The miss program's first root constant: which surfaces its rays are of.
 pub(crate) const MISS_OPAQUE: u32 = 0;
 pub(crate) const MISS_ALPHA: u32 = 1;

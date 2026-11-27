@@ -3396,7 +3396,14 @@ impl State {
             _ => (seen.Width, seen.Height) == (of.Width, of.Height),
         };
         if of.Format.0 != format || !sizes || volume != (role == Role::Air) {
-            once!(?role, format = of.Format.0, "no stand-in for the indirect light: another image");
+            once!(
+                ?role,
+                format = of.Format.0,
+                size = ?(of.Width, of.Height),
+                depth_format = seen.Format.0,
+                depth_size = ?(seen.Width, seen.Height),
+                "no stand-in for the indirect light: another image"
+            );
             if role == Role::Miss {
                 crate::ambient::note_miss(MissNote::NotReady);
             }
@@ -4460,6 +4467,32 @@ impl State {
     /// from the buffer's host copy, where earlier dispatches may have
     /// written them. False if it cannot run on the host.
     pub(crate) fn execute_indirect(
+        &mut self,
+        list: &HostList,
+        (kind, stride, max): (u32, u32, u32),
+        arguments: u64,
+        count: Option<u64>,
+    ) -> bool {
+        let ran = self.execute_indirect_inner(list, (kind, stride, max), arguments, count);
+        // Where the reflection program's executions go (the eye stand-in).
+        #[cfg(feature = "diagnostics")]
+        {
+            let p = crate::pipeline::host_pipeline(self.pipeline as This);
+            let miss = p.and_then(|p| p.stages.first().and_then(|s| s.shader.ambient)) == Some(crate::ambient::Role::Miss);
+            let named = p.map(|p| p.name.to_string());
+            if miss || named.as_deref().is_some_and(|n| n.contains("06bb6e728c7c99bf")) {
+                static N: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+                let n = N[usize::from(ran)].fetch_add(1, Ordering::Relaxed);
+                if n.is_power_of_two() || n == 0 {
+                    tracing::info!(ran, n, kind, stride, max, counted = count.is_some(), miss, named = ?named,
+                        "the miss program's indirect execution");
+                }
+            }
+        }
+        ran
+    }
+
+    fn execute_indirect_inner(
         &mut self,
         list: &HostList,
         (kind, stride, max): (u32, u32, u32),

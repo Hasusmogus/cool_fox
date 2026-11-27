@@ -51,6 +51,12 @@ fn translate(bytes: &[u8]) -> Result<Vec<String>, String> {
     let programs = native_programs(dxil).map_err(|e| e.to_string())?;
     let mut lines = Vec::new();
     for p in programs {
+        // USED=1: the descriptors the program reads (root parameter, place in its table).
+        if std::env::var_os("USED").is_some() {
+            for u in &p.used {
+                lines.push(format!("used {:?} {:?} slot {} offset {} register {} dwords {}", u.kind, u.root, u.slot, u.table_offset_dwords, u.lower_bound, u.dwords));
+            }
+        }
         let program = spill::build(&p).map_err(|e| format!("{:?}: ir: {e}", p.stage))?;
         let st = structure::structure(&program).map_err(|e| format!("{:?}: structure: {e}", p.stage))?;
         let res = resource::track(&program, &p.layout, p.stage, Some(&st)).map_err(|e| format!("{:?}: resources: {e}", p.stage))?;
