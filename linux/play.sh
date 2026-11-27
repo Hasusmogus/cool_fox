@@ -55,6 +55,10 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 # Small fills the title itself wrote go on without waiting for every flight in the air
 # (the drain was ~65 ms a frame). Kelvaroq's mesh launch (patch 0041) stays off here.
 : "${VICTORY_FILL_TITLE:=1}" "${VICTORY_MESH_LAUNCH:=0}"
+# A slot rewritten with another texture of the same dimension keeps showing the old one until
+# the new one has uploaded (default 1: only the same kind). Without it faces in the diner
+# cutscene showed coloured dots ("confetti") while their textures were mid-upload (runs 94/95).
+: "${VICTORY_KEEP_SHOWN:=2}"
 # Vice-Tay's memory profile for 10-14 GB NVIDIA cards: more title buffers and windows in
 # the card's memory (110-120 -> 58 ms a frame steady; copy-back 38 -> 15 ms).
 : "${VICTORY_CARD_BUFFERS_MB:=1536}" "${VICTORY_CARD_WINDOWS_MB:=1024}"
