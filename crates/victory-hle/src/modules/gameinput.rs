@@ -1,8 +1,6 @@
-//! `gameinput.dll`: input devices from the host. Gamepads come from XInput
-//! (host slots 0-3); while none is connected, the keyboard drives one
-//! stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is a device of its own
-//! too. A poll thread turns host state into readings (a new one per change)
-//! and runs device callbacks on connect and disconnect.
+//! `gameinput.dll`: XInput pads, DualSense HID gamepads and the keyboard.
+//! By default they feed one gamepad. The keyboard is also a separate device.
+//! A poll thread turns host state into readings and runs device callbacks.
 #![allow(non_snake_case)]
 // Title code calls these through the objects, passing pointers the real API
 // would trust.
@@ -20,6 +18,9 @@ use std::time::{Duration, Instant};
 use super::xasync::{E_INVALIDARG, E_NOTIMPL};
 use super::xgameruntime::{HRESULT, S_OK};
 use crate::{HleExport, HleModule};
+
+#[cfg(windows)]
+mod dualsense;
 
 /// The documented errors.
 pub const DEVICE_DISCONNECTED: HRESULT = 0x838A_0001_u32 as i32;
@@ -52,7 +53,9 @@ const LEFT_STICK: u32 = 0x1000;
 const RIGHT_STICK: u32 = 0x2000;
 
 /// Devices: host pad slots, the keyboard's stand-in pad, the keyboard.
-const PADS: usize = 4;
+const XINPUT_PADS: usize = 4;
+const DUALSENSE_PADS: usize = 4;
+const PADS: usize = XINPUT_PADS + DUALSENSE_PADS;
 const FALLBACK: usize = PADS;
 const KEYBOARD: usize = PADS + 1;
 const DEVICES: usize = PADS + 2;
@@ -107,6 +110,8 @@ const _: () = assert!(size_of::<KeyState>() == 12 && size_of::<PadState>() == 28
 
 /// Host input, or a fake in tests.
 trait Source: Send {
+    /// Sample buffered devices on the input poll, independent of rumble requests.
+    fn refresh(&mut self) {}
     /// The pad in host slot `slot`, `None` when the slot is empty.
     fn pad(&mut self, slot: usize) -> Option<PadState>;
     /// Keys held down; none while the title's window lacks focus.
@@ -221,7 +226,14 @@ impl Device {
     fn new(index: usize) -> Device {
         let mut id = [0; 32];
         id[..7].copy_from_slice(b"victory");
-        id[31] = index as u8 + 1;
+        // Keep the IDs already saved for XInput (1-4), the stand-in (5)
+        // and the keyboard (6). Native DualSense pads start at 7.
+        id[31] = match index {
+            FALLBACK => 5,
+            KEYBOARD => 6,
+            i if i < XINPUT_PADS => (i + 1) as u8,
+            _ => (index + 3) as u8,
+        };
         let info = DeviceInfo {
             size: size_of::<DeviceInfo>() as u32,
             id,
@@ -432,6 +444,7 @@ impl Hub {
     fn poll(&self) {
         let (pads, keys) = {
             let mut source = lock(&self.source);
+            source.refresh();
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
             (pads, source.keys())
         };
@@ -1114,7 +1127,7 @@ pub(crate) fn module() -> HleModule {
     }
 }
 
-/// Host input: XInput pads, the keyboard while our process has focus.
+/// Host gamepads and the keyboard while our process has focus.
 #[cfg(windows)]
 mod host {
     use std::time::{Duration, Instant};
@@ -1176,11 +1189,19 @@ mod host {
 
     #[derive(Default)]
     pub(super) struct Host {
-        empty_until: [Option<Instant>; PADS],
+        empty_until: [Option<Instant>; XINPUT_PADS],
+        dualsense: dualsense::Controllers,
     }
 
     impl Source for Host {
+        fn refresh(&mut self) {
+            self.dualsense.poll();
+        }
+
         fn pad(&mut self, slot: usize) -> Option<PadState> {
+            if slot >= XINPUT_PADS {
+                return self.dualsense.state(slot - XINPUT_PADS);
+            }
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1232,6 +1253,10 @@ mod host {
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
+            if slot >= XINPUT_PADS {
+                self.dualsense.rumble(slot - XINPUT_PADS, low, high);
+                return;
+            }
             let speeds = XINPUT_VIBRATION {
                 wLeftMotorSpeed: low,
                 wRightMotorSpeed: high,
@@ -1536,6 +1561,39 @@ mod tests {
         release(rest);
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Sony DualSense connected over USB or Bluetooth"]
+    fn connected_dualsense_delivers_a_gameinput_reading() {
+        let hub = Hub::new(host(), false);
+        let start = Instant::now();
+        let slot = loop {
+            hub.poll();
+            if let Some(slot) = (XINPUT_PADS..PADS).find(|&slot| hub.state().slots[slot].connected)
+            {
+                break slot;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(8),
+                "no report from a connected DualSense"
+            );
+            std::thread::sleep(POLL);
+        };
+        // Keep the same device through another HID enumeration.
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            hub.poll();
+            let reading = current(hub, GAMEPAD_KIND, slot).expect("DualSense lost its reading");
+            let state = pad(reading);
+            release(reading);
+            if Instant::now() >= until {
+                println!("DualSense GameInput reading: {state:?}");
+                break;
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
     #[test]
     fn keys_feed_the_keyboard_and_the_stand_in_pad() {
         let (hub, host) = fake();
@@ -1588,14 +1646,26 @@ mod tests {
         // A pad is switched on, in any slot: its input arrives, beside the
         // keyboard's, and no device comes or goes.
         host.lock().unwrap().pads[2] = Some(PadState { buttons: A, left_y: -0.5, ..Default::default() });
+        host.lock().unwrap().pads[XINPUT_PADS] = Some(PadState {
+            buttons: MENU,
+            right_trigger: 0.75,
+            ..Default::default()
+        });
         hub.poll();
         let p = pad(hub);
-        assert_eq!((p.buttons, p.left_x, p.left_y), (A, 1.0, -0.5));
+        assert_eq!(
+            (p.buttons, p.left_x, p.left_y, p.right_trigger),
+            (A | MENU, 1.0, -0.5, 0.75)
+        );
         let device: *const Device = &hub.devices[FALLBACK];
         set_rumble(device, &[1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(host.lock().unwrap().rumble, [(2, u16::MAX, 0)]);
+        assert_eq!(
+            host.lock().unwrap().rumble,
+            [(2, u16::MAX, 0), (XINPUT_PADS, u16::MAX, 0)]
+        );
         // And off again.
         host.lock().unwrap().pads[2] = None;
+        host.lock().unwrap().pads[XINPUT_PADS] = None;
         host.lock().unwrap().keys.clear();
         hub.poll();
         assert_eq!(pad(hub), PadState::default());
@@ -1683,6 +1753,9 @@ mod tests {
     #[test]
     fn devices_are_found_by_id_and_rumble_reaches_the_host() {
         let (hub, host) = fake();
+        assert_eq!(hub.devices[FALLBACK].info.id[31], 5);
+        assert_eq!(hub.devices[KEYBOARD].info.id[31], 6);
+        assert_eq!(hub.devices[XINPUT_PADS].info.id[31], 7);
         host.lock().unwrap().pads[2] = Some(PadState::default());
         hub.poll();
         let device = &hub.devices[2] as *const Device;
