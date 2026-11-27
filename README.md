@@ -1,128 +1,136 @@
-# cool_fox (CGBJ Runtime Continuation)
+# victory-linux-nvidia
 
-[![CI](https://github.com/DoubleGhosty/cool_fox/actions/workflows/ci.yml/badge.svg)](https://github.com/DoubleGhosty/cool_fox/actions/workflows/ci.yml)
-[![PortWatch VI](https://img.shields.io/badge/PortWatch%20VI-91.5%25%20Playable-brightgreen)](https://portwatch-vi.xyz/#effort-cgbj)
+**The VIctory Xbox Series runtime on Linux, tuned for NVIDIA RTX cards.**
 
-Active community continuation and development branch of `cool_fox` (the CGBJ runtime, ranked **#1 / 91.5% Playable** on PortWatch VI).
+A fork of [cool_fox](https://github.com/DoubleGhosty/cool_fox) (the CGBJ runtime continuation)
+that runs under Wine with vkd3d-proton. It carries the Linux fixes the runtime needs and the
+best measured changes from across the VIctory forks, each one tested on the same machine and the
+same scene before it was kept.
 
-This build unites the cutting-edge optimizations from leading PortWatch projects (`avatarmanz`, `codec-d`, `DexNom`, `Belobug`, and community contributors) into a unified, verified runtime for both AMD Radeon and NVIDIA GeForce GPUs.
-
----
-
-## Key Features & Improvements
-
-- **Pareto Memory Residency & 32 GB RAM Support:** Adaptive GPU memory residency limits, preventing WDDM paging exhaustion (`0x8007000E`) on mid-range and 32 GB systems.
-- **Shader LOD Slot Fix (PR #2):** Leaves unused LOD slots undefined in array texture coordinate queries, resolving DXIL validator errors on retail shaders.
-- **NVIDIA & Video Stream Synchronization (PR #6):** Synchronous flush for decoded video frame copies, eliminating stutter and repeated frames in opening videos during multithreaded recording (`VICTORY_THIN=1`), and constant ambient lighting (`VICTORY_AMBIENT=constant:0.8`).
-- **Wine / Proton & DXIL Robustness (PR #10):** Code-generated root signatures replacing fragile comment pragmas for vkd3d-shader, single-latch DXIL loop CFG normalization, and 256 MiB pipeline worker stack.
-- **Voxel Visibility Recovery:** Restores wave64 mask provenance when restored from scalar copies, enabling foliage and volumetric voxel visibility shaders to pass compilation.
-- **Custom Resolution & Scaling:** `VICTORY_OUTPUT=1920x1080` (or `2560x1440`) and `VICTORY_RENDER_SCALE=0.667..1.0` with the 4K backbuffer pool check bypass.
-- **Frame Rate Unlock:** `VICTORY_FRAME_INTERVAL_MS=16.667` (60 FPS) or `8.333` (120 FPS) while keeping game simulation clock strictly at 1.00x.
-- **Renderer Port 5 (Zero-Copy CBV):** `VICTORY_PORT_CBV=1` reads constant buffers as raw bytes in-place, eliminating ~22,000 buffer copies per frame.
+> **No game files are included or distributed.** You need your own legal dump of the game.
+> Never download a prebuilt "GTA VI PC" package: build from source.
 
 ---
 
-## How to Run
+## Where it stands
 
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader model 6.6 and mesh shaders, Rust (1.98+), MSVC build tools, and your own legal Xbox Series dump of the game.
+Measured in the opening prison scenes (Series X profile, 1080p output) on the test machine below.
+Every number is from a scripted run: launch, wait for the scene, measure 150 s.
 
-### Build from Source
+| | Start of the tuning (run 56) | Now (runs 85–90) |
+|---|---|---|
+| Steady gameplay | ~128 ms a frame (7.8 fps) | **~51 ms (~19 fps)** |
+| Average over the run | 231 ms (4.3 fps) | ~62–67 ms (15–16 fps) |
+| Draws a frame | ~3,700 | ~4,000–4,800 |
 
-```powershell
-git clone https://github.com/DoubleGhosty/cool_fox.git
-cd cool_fox
-cargo build --release --locked -p victory
-```
+**Working:** boot, menus, cutscenes, gameplay in the first areas, lit interiors, faces with moving
+mouths, NPC heads and clothing, audio.
 
-### Launch
+**Known issues:** some interiors still darker than on console; occasional blue reflections on eyes and
+small speckled patches; some texture and lighting pop-in after camera cuts. The frame is limited by the
+thread that prepares and submits GPU work (~50 ms of work a frame) and the GPU (~87 % busy):
+30 fps needs both cut by about a third.
 
-```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
-.\Play-VIctory.cmd
-```
-
-For 4GB / 8GB VRAM laptops or low-memory systems, you can also launch with:
-
-```powershell
-.\Play-VIctory-4GB.cmd
-```
+**Test machine:** Arch Linux, KDE Plasma (Wayland), AMD Ryzen 5 7600X (12 threads), NVIDIA GeForce
+RTX 5070 12 GB, Wine-staging 11.22 with a patched wineserver, vkd3d-proton (master), DXVK's dxgi.
 
 ---
 
-## Upstream & Acknowledgements
+## What this fork changes
 
-- **codec-d / CGBJ:** Original `cool_fox` runtime and pareto residency architecture.
-- **AvatarManz (VIctory-7900XTX):** Multi-threaded command list recording, framerate unlocking, and renderer ports.
-- **DexNom:** Wave64 lowering, scalar recovery, and shader structure passes.
-- **Belobug:** Ambient lighting and integer target blend protections.
-- **Marvisak & fxceless:** Foundational VIctory compatibility layer.
+Measured one at a time against the run before (frame times are steady gameplay unless noted).
 
-**Legal notice:** This repository contains no copyrighted game code, assets, or executables. All code is licensed under GPL-3.0-or-later.
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
+### Speed
+
+| Change | Source | Effect |
+|---|---|---|
+| Small fills the title wrote itself go on without draining every flight (`VICTORY_FILL_TITLE=1`) | upstream switch, turned on | waits for the card ~65 ms → ~0 a frame |
+| Memory profile for 10–14 GB NVIDIA cards: more title buffers in VRAM (`VICTORY_CARD_BUFFERS_MB=1536`, `VICTORY_CARD_WINDOWS_MB=1024`) | [Vice-Tay](https://github.com/TaynanGT/Vice-Tay) #339 | **110–120 → 58 ms**; copy-back 38 → 15 ms |
+| Structure builder off with the frame-estimated ambient light (`VICTORY_BVH_BUILDER=0`, `VICTORY_AMBIENT=1`) | upstream switches | 58 → 51–55 ms, and lit interiors |
+| Six helper threads for refreshes and copies (`VICTORY_WIDE_WORKERS=6`) | this fork | ~1–2 ms |
+| Ray walks end at the root while the builder is off (`VICTORY_BVH_MISS=1`) | VIctory-NVIDIA 24a479d32, via [Victory-United](https://github.com/Fayberr/Victory-United) | card time not spent walking empty structures |
+| A wineserver that keeps a process's views in a tree (`linux/wine/`) | this fork | server CPU 40 % → 3–11 % (the title maps ~1,000 views a second) |
+| Wave64 programs on 32-lane NVIDIA cards: pair meetings, alternating exchange slots | this fork | a defrag shader 32 → 11.6 ms of card time |
+
+### Picture
+
+| Change | Source | Effect |
+|---|---|---|
+| Textures without levels on demand (`VICTORY_LEVELS_ON_DEMAND=0`) | upstream switch, turned off | unbacked tiled levels read zero under vkd3d-proton/NVIDIA: **black rooms, walls, clothes and NPC heads fixed** |
+| Ray programs' fault pages raised from 2,048 to 16,384 for the run | this fork | pages read as zero after a few minutes: dark, speckled indirect light fixed |
+| 16-bit values moved bit-exactly through typed views (`HostShader::half_views`) | [VIctory fork](https://github.com/fxceless/victory-fork) 58de9bf, pull request #927 | **mouths move** (the face network's indices) |
+| Console threads from a group counter in groups of several host waves | VIctory-NVIDIA 854f57f (Vice-Tay c125c0c) | NVIDIA's 2-D group layout no longer runs some threads twice |
+| Placed views ignore padding words | VIctory-NVIDIA PR #58 (project-flamingo) | confetti on faces, leaked views |
+| Reflections that miss take the ambient estimate, not the sky (`VICTORY_AMBIENT_SPECULAR=1`) | VIctory-NVIDIA 2db59d48, with a placed-depth fix here | blue-white eyes, blue blotches (in testing) |
+
+### Stability
+
+| Change | Source |
+|---|---|
+| The title's hang handler logs and returns instead of faulting at `+0x23cf683` (`VICTORY_TITLE_WATCHDOG=1` keeps it) | this fork |
+| No arena storm when the low address range is full; upload room reserved at start | VIctory-NVIDIA PR #88, e69e39c5 |
+| Mono convolutions in the audio DSP (phone calls, TVs, reverb; not yet verified here) | VIctory-NVIDIA PR #77 |
+| Copy range checks and late-write learning for card steps | [SlaktarnVI](https://github.com/Slaktarn700/SlaktarnVI) |
+
+Tried and left off by default because they measured neutral or worse here: Kelvaroq's mesh launch
+(`VICTORY_MESH_LAUNCH=1`), renderer ports 6 and 7, `VICTORY_PLACED_ORDER`, `VICTORY_ASK_EARLY`,
+`VICTORY_PAGE_WRITES=all`, `VICTORY_CARD_RESERVE_BUDGETS`. The code stays, for other machines.
+
+---
+
+## Quick start
+
+Full setup (Wine prefix, vkd3d-proton, DXVK's dxgi, `d3dcompiler_47`, the patched wineserver) is in
+**[linux/README.md](linux/README.md)**. In short:
+
+```sh
+# 1. Build (cross-compiled to Windows with cargo-xwin)
+rustup toolchain install
+cargo install --locked cargo-xwin
+cargo xwin build --release --locked -p victory --target x86_64-pc-windows-msvc
+
+# 2. Translate the shaders and build every pipeline ahead (once; ~30 min the first time)
+DUMP=/path/to/your/dump linux/play.sh shaders
+DUMP=/path/to/your/dump linux/play.sh warm --again
+
+# 3. Play
+DUMP=/path/to/your/dump linux/play.sh
 ```
 
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+Everything a run writes (prefix, caches, saves, logs) goes outside the repository: its parent folder by
+default, or `VICTORY_LINUX_WORK`. Every setting in `linux/play.sh` can be overridden by exporting it
+first. `CONSOLE=series-s` selects the Series S profile.
 
-Before the first run, ahead of time (both can be stopped and go on later):
+**Tips**
+- Close the browser and other GPU-heavy programs: the game only gets the VRAM the desktop leaves it
+  (~8 GB of 12 here), and VRAM residency was the biggest single speed lever.
+- After a change to the translator, vkd3d-proton or the shader cache key, run `warm --again` in full and
+  measure on the second run: the pipeline library is rebuilt by the first.
+- `linux/tools/ab-run.sh <name> [VAR=value ...]` runs one scripted measurement (frame time, GPU load,
+  two screenshots), for comparing one switch at a time.
 
-```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
-```
-
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
-
-## What is different here
-
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
-
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
+---
 
 ## Credits
 
-This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
+This fork stands on the work of many people. Imported changes keep their original authorship and
+commit references in the history.
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: the loader, the runtime services, the Direct3D 12 back end and
-  the shader recompiler.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
-  cube gradients, sparse textures.
-- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
-  the ambient light idea, pipeline workers, and work by romainhedouin.
-- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
-- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
-  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
-  reads into title memory.
-- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
-  title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+- **[cool_fox](https://github.com/DoubleGhosty/cool_fox)** (CGBJ runtime continuation), the base, and the
+  upstream VIctory work it carries: avatarmanz, codec-d, DexNom, Belobug and contributors
+  ([its README](docs/README-cool_fox.md)).
+- **[Vice-Tay](https://github.com/TaynanGT/Vice-Tay)** (TaynanGT and contributors): the NVIDIA memory profiles.
+- **[VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)** (trustno1-coder): face, reflection,
+  arena and audio fixes.
+- **[VIctory fork](https://github.com/fxceless/victory-fork)** (fxceless) and **tippythetaidum** (#927): the mouth fix.
+- **[Kelvaroq](https://github.com/stellarr-studio/kelvaroq)** (stellarr-studio): the mesh launch, measurements
+  of the memory wall.
+- **[SlaktarnVI](https://github.com/Slaktarn700/SlaktarnVI)** (Slaktarn700): card-step learning.
+- **[Victory-United](https://github.com/Fayberr/Victory-United)** (Fayberr): the BVH-miss switch's port.
+- The community testers and writers whose measurements and write-ups pointed at the drains, the memory
+  profile and the watchdog.
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
+GPL-3.0-or-later, as upstream ([LICENSE](LICENSE)). This project contains no game code or assets and is
+not affiliated with or endorsed by Rockstar Games, Take-Two Interactive or Microsoft.
