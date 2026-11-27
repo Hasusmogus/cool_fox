@@ -56,7 +56,13 @@ fn translate(bytes: &[u8]) -> Result<Vec<String>, String> {
         let res = resource::track(&program, &p.layout, p.stage, Some(&st)).map_err(|e| format!("{:?}: resources: {e}", p.stage))?;
         let raised = io::raise(&program, &p).map_err(|e| format!("{:?}: I/O: {e}", p.stage))?;
         match emit::emit(&container, &p, &program, &st, &raised, &res) {
-            Ok(shader) => lines.push(format!(
+            Ok(shader) => {
+                // DUMP_DXIL=<dir>: the emitted container, for a disassembler.
+                if let Some(dir) = std::env::var_os("DUMP_DXIL") {
+                    let at = std::path::Path::new(&dir).join(format!("{:?}.dxbc", p.stage));
+                    let _ = std::fs::write(at, &shader.dxil);
+                }
+                lines.push(format!(
                 "{:?}: emitted {} bytes of DXIL{}",
                 p.stage,
                 shader.dxil.len(),
@@ -64,7 +70,8 @@ fn translate(bytes: &[u8]) -> Result<Vec<String>, String> {
                     victory_shader::native::StageIo::Cs(c) => format!(", numthreads {:?}", c.threads),
                     _ => String::new(),
                 }
-            )),
+            ))
+            }
             Err(ShaderError::Unsupported { offset, what }) => {
                 return Err(format!("{:?}: emit at {offset:#x}: {what}", p.stage));
             }
