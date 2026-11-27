@@ -27,8 +27,16 @@ export DXVK_CONFIG="${DXVK_CONFIG:-dxgi.hideNvidiaGpu = False}"
 # hash, one per line in $WORK/skip-pipelines.txt (linux/tools/auto-skip.sh fills it).
 if [[ -z "${VICTORY_SKIP_PIPELINES:-}" && -f "$WORK/skip-pipelines.txt" ]]; then
   VICTORY_SKIP_PIPELINES="$(grep -oE '^[0-9a-f]{16}' "$WORK/skip-pipelines.txt" | paste -sd,)"
-  export VICTORY_SKIP_PIPELINES
 fi
+# Shaders left out by default (VICTORY_LEAVE_OUT; set it empty to run them all), as VIctory-NVIDIA
+# does: the decal heap's defrag (02384a60fda6f2d0, 13.7 ms of the card a frame in run 112, smears),
+# heat haze (731a39171b568298), and the water's tiled light (5dc3b25986622949, 6f225b641c5b0708:
+# dark blocks on open water and ~15 ms near it on 32-lane GPUs). Run 113: GPU 92 -> 68% busy.
+VICTORY_LEAVE_OUT="${VICTORY_LEAVE_OUT-02384a60fda6f2d0,731a39171b568298,5dc3b25986622949,6f225b641c5b0708}"
+if [[ -n "$VICTORY_LEAVE_OUT" ]]; then
+  VICTORY_SKIP_PIPELINES="${VICTORY_SKIP_PIPELINES:+$VICTORY_SKIP_PIPELINES,}$VICTORY_LEAVE_OUT"
+fi
+export VICTORY_SKIP_PIPELINES="${VICTORY_SKIP_PIPELINES:-}"
 # NVIDIA's on-disk shader cache: large and never trimmed, so pipelines built ahead
 # by `play.sh warm` are still there when the title asks for them.
 export __GL_SHADER_DISK_CACHE=1
