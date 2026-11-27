@@ -3276,9 +3276,21 @@ impl State {
                     Some(Root::Constants(c)) => c.first().copied(),
                     _ => None,
                 })
+                // This branch's translation lists no root-constant entry for
+                // the miss program: the first root constants bound are its.
+                .or_else(|| {
+                    self.roots_ref(true).iter().find_map(|r| match r {
+                        Root::Constants(c) => c.first().copied(),
+                        _ => None,
+                    })
+                })
                 .unwrap_or(u32::MAX),
             _ => 0,
         };
+        if role == Role::Miss {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| tracing::info!(layer, "the reflection stand-in: the miss program's first root constant"));
+        }
         // The alpha layer only with VICTORY_AMBIENT_SPECULAR_ALPHA=1: its pixels
         // are of transparent surfaces (glass, foam, wakes on water) and the
         // depth read is the opaque one behind them; outdoors on water that is
