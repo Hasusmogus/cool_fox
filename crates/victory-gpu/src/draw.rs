@@ -3302,17 +3302,31 @@ impl State {
             let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(slot)) else {
                 return None;
             };
-            let resource = match crate::descriptor::view(table + u64::from(offset) * 4)? {
-                View::Shader(r, _) | View::Unordered(r, ..) => r,
-                _ => return None,
-            };
             let start = match self.ambient_tables.iter().find(|m| m.0 == slot) {
                 Some(m) => m.1,
                 None => self.user_value(true, slot, RootType::Table, 0),
             };
-            let host = crate::resource::host_resource(resource as This)?;
-            // SAFETY: a live resource.
-            let desc = unsafe { host.GetDesc() };
+            let desc = match crate::descriptor::view(table + u64::from(offset) * 4)? {
+                View::Shader(r, _) | View::Unordered(r, ..) => {
+                    let host = crate::resource::host_resource(r as This)?;
+                    // SAFETY: a live resource.
+                    unsafe { host.GetDesc() }
+                }
+                // A placed view (memory without a resource object, as the
+                // miss program's depth is here): its description words give
+                // the dimension (0), width (4), height (6) and format (8);
+                // the heap's slot holds the host view made for it.
+                View::Placed(_, words, _) => D3D12_RESOURCE_DESC {
+                    Dimension: if words[0] == 3 { D3D12_RESOURCE_DIMENSION_TEXTURE2D } else { D3D12_RESOURCE_DIMENSION_UNKNOWN },
+                    Width: u64::from(words[4]),
+                    Height: words[6],
+                    DepthOrArraySize: 1,
+                    MipLevels: 1,
+                    Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(words[8] as i32),
+                    ..Default::default()
+                },
+                _ => return None,
+            };
             Some((desc, heap.gpu_handle((start + offset * 4) / 32)))
         };
         let at = match role {
@@ -3329,6 +3343,17 @@ impl State {
         };
         let (Some((of, image)), Some((seen, depth))) = (image, depth) else {
             once!(?role, "no stand-in for the indirect light: other tables");
+            // What the program reads from tables, to place MISS_LIGHT / MISS_DEPTH.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                let used: Vec<String> = t
+                    .used
+                    .iter()
+                    .filter(|u| u.root == RootType::Table)
+                    .map(|u| format!("{:?}@({},{})", u.kind, u.slot, u.table_offset_dwords))
+                    .collect();
+                tracing::warn!(?role, image = image.is_some(), depth = depth.is_some(), used = ?used, "the stand-in's program reads these from tables");
+            });
             if role == Role::Miss {
                 crate::ambient::note_miss(MissNote::NotReady);
             }
