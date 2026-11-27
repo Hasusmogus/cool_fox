@@ -303,7 +303,29 @@ pub(crate) fn card_room_kept() -> u64 {
     // no texture was made any more with 5 GB of the card free (session
     // play-1125-0127: 1,453 passes refused, the ground and people black).
     const SEEN: u64 = 1 << 30;
-    card_limits().1.min(SEEN).saturating_sub(CARD_BYTES[0].load(Ordering::Relaxed) + CARD_REFUSED[1].load(Ordering::Relaxed))
+    let buffers = card_limits().1;
+    // With the budgets reserved (`VICTORY_CARD_RESERVE_BUDGETS=1`, Vice-Tay's
+    // 10-19 GB NVIDIA profile, #339): the whole configured buffer budget when
+    // it was asked for (`VICTORY_CARD_BUFFERS_MB`), not the 1 GiB seen, and
+    // the windows' budget too (run 80: 130 buffers turned down at 950 MB of
+    // 1,536 with the texture queue at the card's line).
+    let (buffers, windows) = if reserve_card_budgets() {
+        let asked = std::env::var_os("VICTORY_CARD_BUFFERS_MB").is_some();
+        (if asked { buffers } else { buffers.min(SEEN) }, window_card_most())
+    } else {
+        (buffers.min(SEEN), 0)
+    };
+    buffers
+        .saturating_sub(CARD_BYTES[0].load(Ordering::Relaxed) + CARD_REFUSED[1].load(Ordering::Relaxed))
+        .saturating_add(windows.saturating_sub(WINDOW_CARD_BYTES.load(Ordering::Relaxed)))
+}
+
+/// Whether the card room kept for title buffers' copies ([`card_room_kept`])
+/// is the configured budgets, windows included (`VICTORY_CARD_RESERVE_BUDGETS=1`;
+/// off by default; from Vice-Tay, scripts/play.ps1's 10-19 GB NVIDIA profile).
+fn reserve_card_budgets() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_RESERVE_BUDGETS").is_some_and(|v| v == "1"))
 }
 
 /// The copies in the card's memory.
