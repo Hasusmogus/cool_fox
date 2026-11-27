@@ -168,6 +168,11 @@ enum Console {
 }
 
 fn main() -> Result<()> {
+    // Before anything else can take the address space shaders read by
+    // address (VIctory-NVIDIA e69e39c5: on players' PCs [4 GiB, 2^37) was
+    // full by the first ray-traced frame and the title's upload failed).
+    #[cfg(windows)]
+    victory_hle::reserve_upload_space();
     victory_core::logging::init("info");
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]
