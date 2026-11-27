@@ -4313,24 +4313,35 @@ impl<'a> Lower<'a> {
         let first_lane = self.s.op(c, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[lane]);
         let first = self.s.m.cmp(c, pred::EQ, lane, first_lane);
         let (zero, one) = (self.s.m.i32(0), self.s.m.i32(1));
-        let add = self.s.m.select(c, first, one, zero);
-        let old = self.s.m.atomic(c, Rmw::Add, ptr, add);
-        let old = self.s.op(c, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[old]);
+        // The first lane alone adds: atomics of a wave's lanes on one LDS dword are done one
+        // lane after another, 32 for each arrival and each look while waiting when every
+        // lane took part (the heap defragmenter's relocations, 223 meetings in its code,
+        // 25 ms of the card a frame).
+        let add = self.s.m.new_block();
+        let join = self.s.m.new_block();
+        self.s.m.terminate(c, Term::CondBr(first, add, join));
+        let added = self.s.m.atomic(add, Rmw::Add, ptr, one);
+        self.s.m.terminate(add, Term::Br(join));
+        let old = self.s.m.phi(join, i32t);
+        self.s.m.set_phi(old, vec![(added, add), (zero, c)]);
+        let old = self.s.op(join, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[old]);
         self.s.flags |= flags::WAVE_OPS;
-        let odd = self.s.m.bin(c, Bin::Or, old, one);
-        let target = self.s.m.bin(c, Bin::Add, odd, one);
+        let odd = self.s.m.bin(join, Bin::Or, old, one);
+        let target = self.s.m.bin(join, Bin::Add, odd, one);
         // the wait, with a bound: a pair that never meets (a translation fault) costs the
-        // dispatch its result rather than the device
+        // dispatch its result rather than the device. Each look is a plain load behind an LDS
+        // fence (which keeps it in the loop), one read the wave's lanes share.
         let wait = self.s.m.new_block();
-        self.s.m.terminate(c, Term::Br(wait));
+        self.s.m.terminate(join, Term::Br(wait));
         let tries = self.s.m.phi(wait, i32t);
-        let now = self.s.m.atomic(wait, Rmw::Or, ptr, zero);
+        self.s.op(wait, "barrier", Attr::NoDuplicate, void, 80, &[fence]);
+        let now = self.s.m.load(wait, ptr);
         let met = self.s.m.cmp(wait, pred::IUGE, now, target);
         let next = self.s.m.bin(wait, Bin::Add, tries, one);
         let limit = self.s.m.i32(PAIR_MEET_LIMIT);
         let late = self.s.m.cmp(wait, pred::IUGE, next, limit);
         let leave = self.s.m.bin(wait, Bin::Or, met, late);
-        self.s.m.set_phi(tries, vec![(zero, c), (next, wait)]);
+        self.s.m.set_phi(tries, vec![(zero, join), (next, wait)]);
         self.s.m.terminate(wait, Term::CondBr(leave, after, wait));
         self.s.op(after, "barrier", Attr::NoDuplicate, void, 80, &[fence]);
     }
@@ -4436,8 +4447,8 @@ impl<'a> Lower<'a> {
         let index = self.s.m.bin(at, Bin::Add, base, wave);
         let lds = self.s.lds();
         let ptr = self.s.m.element(at, lds, index);
-        let zero = self.s.m.i32(0);
-        let now = self.s.m.atomic(at, Rmw::Or, ptr, zero);
+        // (this wave's own arrivals decide the parity: a plain load sees them)
+        let now = self.s.m.load(at, ptr);
         let now = self.s.op(at, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[now]);
         self.s.flags |= flags::WAVE_OPS;
         let two = self.s.m.i32(2);
