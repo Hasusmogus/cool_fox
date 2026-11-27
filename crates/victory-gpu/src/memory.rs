@@ -104,8 +104,15 @@ const BACK: u64 = 256 << 10;
 /// Pages taken from the faults, of one frame and in all, at most: a ray in a
 /// structure that is not right goes anywhere, and 2,048 a frame took all the
 /// pages there are in the first seconds (run light-4).
+///
+/// In all: 16,384 (1 GiB of 64 KiB pages; 2,048 before). The run's 2,048 were
+/// used up minutes into the world (run 78: "faults in all 2048", 56 pages a
+/// frame turned down from then on), and every page the ray programs touched
+/// after that read zeros for the rest of the run: dark, speckled indirect
+/// light. The VIctory fork measured 8,192 used up in one to three minutes and
+/// made it a recycled budget (3e573d2); until that is ported, a larger limit.
 const FAULTS: usize = 128;
-const FAULTS_ALL: usize = 2048;
+const FAULTS_ALL: usize = 16384;
 /// Frames over which every page is looked at once.
 const SWEEP: usize = 128;
 
