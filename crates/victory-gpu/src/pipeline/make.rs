@@ -46,6 +46,9 @@ pub(crate) struct Pending {
     used: AtomicBool,
     /// Report the first request that outlived its frame's compile budget.
     reported_pending: AtomicBool,
+    /// Microseconds draws and dispatches have waited for it, over all frames
+    /// ([`wait`]: at most one frame's budget in all).
+    waited_us: AtomicU64,
     /// Distinguishes work created during loading from first-use creation.
     created_at: Instant,
     /// A pass over the screen ([`GraphicsState::screen_pass`]) or a confirmed
@@ -149,6 +152,7 @@ impl Pending {
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
             reported_pending: AtomicBool::new(false),
+            waited_us: AtomicU64::new(0),
             created_at: Instant::now(),
         }
     }
@@ -318,6 +322,18 @@ fn shared_budget() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_SHARED").is_none_or(|v| v != "0"))
 }
 
+/// Whether a pipeline is waited for only up to one frame's budget in all
+/// (`VICTORY_PIPELINE_WAIT_ONCE=0`: every frame, as before). A program the
+/// driver takes minutes over, or never finishes (one compute pipeline on
+/// NVIDIA, "hung for 180 s" in the warm), had every frame of the opening wait
+/// the whole half second for it and then go without it all the same: 500 of
+/// 1304 ms in four frames (run 29). Waiting longer does not make it sooner;
+/// its draws and dispatches are dropped until it is made, as past the budget.
+fn wait_once() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_WAIT_ONCE").is_none_or(|v| v != "0"))
+}
+
 /// Waits for `p` while frame `frame` has budget left.
 fn wait(p: &Pending, frame: u64) {
     let screen = p.screen && screens_first();
@@ -325,6 +341,15 @@ fn wait(p: &Pending, frame: u64) {
     if budget.is_zero() {
         return;
     }
+    let mine = if wait_once() {
+        let mine = budget.saturating_sub(Duration::from_micros(p.waited_us.load(Ordering::Relaxed)));
+        if mine.is_zero() {
+            return;
+        }
+        mine
+    } else {
+        budget
+    };
     // The frame the budget belongs to, and what was waited of it (or is
     // taken by a thread waiting now); of the passes over the screen too.
     static SPENT: [Mutex<(u64, Duration)>; 2] = [const { Mutex::new((u64::MAX, Duration::ZERO)) }; 2];
@@ -335,7 +360,7 @@ fn wait(p: &Pending, frame: u64) {
         if spent.0 != frame {
             *spent = (frame, Duration::ZERO);
         }
-        let left = budget.saturating_sub(spent.1);
+        let left = budget.saturating_sub(spent.1).min(mine);
         if shared {
             spent.1 += left;
         }
@@ -356,6 +381,7 @@ fn wait(p: &Pending, frame: u64) {
     }
     drop(held);
     let waited = started.elapsed().min(left);
+    p.waited_us.fetch_add(waited.as_micros() as u64, Ordering::Relaxed);
     if screen && waited > Duration::from_millis(500) {
         tracing::info!(
             ms = waited.as_millis() as u64,

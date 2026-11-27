@@ -1582,9 +1582,13 @@ impl State {
     /// False if the draw or dispatch must not run: a root SRV it reads
     /// could not be given a view.
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
+        let _span_all = crate::timeline::span("bind");
         let l = &list.list;
         // Textures picked by index, before anything asks for them.
-        self.early_textures(list, p, compute);
+        {
+            let _span = crate::timeline::span("bind: textures picked by index");
+            self.early_textures(list, p, compute);
+        }
         if crate::host::walls_trace() {
             self.walls_census(p, compute);
         }
@@ -1680,7 +1684,10 @@ impl State {
             if t.stores && crate::picked::on() && crate::picked::picks(&stage.shader, &t.picks) {
                 crate::picked::runs_in(list);
             }
-            let made = self.tables_with_extents(list, &t.tables, compute, &extents);
+            let made = {
+                let _span = crate::timeline::span("bind: descriptor tables");
+                self.tables_with_extents(list, &t.tables, compute, &extents)
+            };
             STORES.set(true);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
@@ -1703,7 +1710,11 @@ impl State {
                 } else {
                     crate::memory::Use::Reads
                 };
-                let Some(ready) = self.memory_ready(list, &t, compute, use_) else {
+                let ready = {
+                    let _span = crate::timeline::span("bind: title memory by address");
+                    self.memory_ready(list, &t, compute, use_)
+                };
+                let Some(ready) = ready else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");
                     return false;
                 };
