@@ -932,6 +932,15 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
 /// Tries of a pair barrier's wait ([`LowerCtx::half_meet`]) before it gives up.
 const PAIR_MEET_LIMIT: u32 = 1 << 22;
 
+/// Whether exchanges between the two host waves of a console wave take two pairs of dwords
+/// in turn, one meeting each instead of two ([`Lower::exchange_slots`];
+/// `VICTORY_PAIR_SLOTS=0`: one pair, two meetings). The heap defragmenter's relocation pass
+/// (360 meetings in its code) took 32 ms of the card a frame.
+fn alternate_slots() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PAIR_SLOTS").is_none_or(|v| v != "0"))
+}
+
 /// The mode of a group barrier the translation adds (host waves meeting):
 /// a wait for the group with a shared-memory fence; the fence alone with
 /// `VICTORY_GROUP_SYNC=0` ([`super::group_sync`]).
@@ -1528,7 +1537,10 @@ impl<'a> Lower<'a> {
                                 // lanes 32..63 are the other host wave: masks, lane reads and lane
                                 // numbers go through two exchange dwords past the program's LDS
                                 exchange = Some((s.lds_dwords, group <= 32, all));
-                                s.lds_dwords += 2 * group.div_ceil(64);
+                                // with pair barriers, two pairs a console wave taken in turn
+                                // ([`Self::exchange_slots`])
+                                let per = if group > 32 && pair_meetings_on() && alternate_slots() { 4 } else { 2 };
+                                s.lds_dwords += per * group.div_ceil(64);
                             }
                         }
                     }
@@ -4355,7 +4367,7 @@ impl<'a> Lower<'a> {
             return Err(GROUP_BARRIER_DIVERGENT);
         }
         // the pair of dwords of this thread's console wave: its half's, then both
-        let pair = self.exchange_pair(slot);
+        let (pair, once) = self.exchange_slots(slot, at);
         let cl = self.console_lane();
         let five = self.s.m.i32(5);
         let half = self.s.m.bin(at, Bin::LShr, cl, five);
@@ -4371,7 +4383,9 @@ impl<'a> Lower<'a> {
         let lo = self.s.m.load(at, p0);
         let hi = self.s.m.load(at, p1);
         // the slots are written again only after every thread read them
-        self.half_meet(at);
+        if !once {
+            self.half_meet(at);
+        }
         Ok((lo, hi))
     }
 
@@ -4385,12 +4399,50 @@ impl<'a> Lower<'a> {
         let thread = self.console_thread();
         let six = self.s.m.i32(6);
         let wave = self.s.m.bin(e, Bin::LShr, thread, six);
-        let one = self.s.m.i32(1);
-        let twice = self.s.m.bin(e, Bin::Shl, wave, one);
+        let shift = self.s.m.i32(if self.alternating() { 2 } else { 1 });
+        let twice = self.s.m.bin(e, Bin::Shl, wave, shift);
         let base = self.s.m.i32(slot);
         let v = self.s.m.bin(e, Bin::Add, base, twice);
         self.pair = Some(v);
         v
+    }
+
+    /// Whether this program's exchanges take two pairs of dwords in turn
+    /// ([`Self::exchange_slots`]): with pair barriers in a group of several console waves.
+    fn alternating(&self) -> bool {
+        self.pair_meet.is_some() && self.exchange.as_ref().is_some_and(|e| !e.1) && alternate_slots()
+    }
+
+    /// The pair of exchange dwords for an exchange written at the end of block `at`, and
+    /// whether the meeting after it is read may be left out. With pair barriers each console
+    /// wave has two pairs and an exchange takes the one of the parity of the meetings its
+    /// waves have had: what one wave wrote into a pair is read by the other before that wave
+    /// comes to the next meeting, and the pair is written again only past it, so the second
+    /// meeting an exchange had (the slots written again only after both read them) is not
+    /// needed. The counter says how many meetings this wave had, `n`: it holds `2n`, or
+    /// `2n + 1` once the other wave came to the next; the same parity for both waves.
+    /// Meetings in the entry block are group barriers the counter does not count: there,
+    /// both meetings as before.
+    fn exchange_slots(&mut self, slot: u32, at: usize) -> (V, bool) {
+        let pair = self.exchange_pair(slot);
+        let Some(counters) = self.pair_meet.filter(|_| self.alternating() && at != self.s.entry) else {
+            return (pair, false);
+        };
+        let i32t = self.s.t.i32;
+        let thread = self.console_thread();
+        let six = self.s.m.i32(6);
+        let wave = self.s.m.bin(at, Bin::LShr, thread, six);
+        let base = self.s.m.i32(counters);
+        let index = self.s.m.bin(at, Bin::Add, base, wave);
+        let lds = self.s.lds();
+        let ptr = self.s.m.element(at, lds, index);
+        let zero = self.s.m.i32(0);
+        let now = self.s.m.atomic(at, Rmw::Or, ptr, zero);
+        let now = self.s.op(at, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[now]);
+        self.s.flags |= flags::WAVE_OPS;
+        let two = self.s.m.i32(2);
+        let which = self.s.m.bin(at, Bin::And, now, two);
+        (self.s.m.bin(at, Bin::Add, pair, which), true)
     }
 
     /// The console's decision of the branch closing IR block `b`, which the wave takes
@@ -9021,7 +9073,7 @@ impl<'a> Lower<'a> {
                     }
                     let cl = self.console_lane();
                     let is = self.s.m.cmp(self.cur, pred::EQ, cl, lane);
-                    let k = self.exchange_pair(slot);
+                    let (k, once) = self.exchange_slots(slot, self.cur);
                     let at = self.begin_guarded(Some(is));
                     let lds = self.s.lds();
                     let ptr = self.s.m.element(self.cur, lds, k);
@@ -9031,7 +9083,9 @@ impl<'a> Lower<'a> {
                     self.half_meet(c2);
                     let ptr = self.s.m.element(c2, lds, k);
                     let r = self.s.m.load(c2, ptr);
-                    self.half_meet(c2);
+                    if !once {
+                        self.half_meet(c2);
+                    }
                     return int(self, r);
                 }
                 let r = self.read_lane(a, lane);

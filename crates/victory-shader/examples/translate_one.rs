@@ -57,9 +57,13 @@ fn translate(bytes: &[u8]) -> Result<Vec<String>, String> {
         let raised = io::raise(&program, &p).map_err(|e| format!("{:?}: I/O: {e}", p.stage))?;
         match emit::emit(&container, &p, &program, &st, &raised, &res) {
             Ok(shader) => lines.push(format!(
-                "{:?}: emitted {} bytes of DXIL",
+                "{:?}: emitted {} bytes of DXIL{}",
                 p.stage,
-                shader.dxil.len()
+                shader.dxil.len(),
+                match &p.io {
+                    victory_shader::native::StageIo::Cs(c) => format!(", numthreads {:?}", c.threads),
+                    _ => String::new(),
+                }
             )),
             Err(ShaderError::Unsupported { offset, what }) => {
                 return Err(format!("{:?}: emit at {offset:#x}: {what}", p.stage));
