@@ -5426,8 +5426,28 @@ mod tests {
             crate::host::read_into(at.ptr as *const u8, &mut bytes).then_some(bytes)
         };
         heap.raw_at(index, &buffer, 64, 1024);
-        let (slot, beside) = (bytes(heap.cpu(index)), bytes(staged(false, 0).unwrap()));
-        assert_eq!(slot, beside, "copied as it was made");
+        // The same view made in place, in another slot of the heap. Not the
+        // bytes of the slot beside it: a heap the card does not see may hold
+        // descriptors in another form, which the copy converts (#88: an
+        // NVIDIA driver on Windows, the first 16 bytes addresses).
+        let direct = heap.dynamic(1).unwrap();
+        let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 64 / 4,
+                    NumElements: 1024 / 4,
+                    StructureByteStride: 0,
+                    Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                },
+            },
+        };
+        // SAFETY: a slot of our heap and a live buffer covering the range.
+        unsafe { host.device.CreateShaderResourceView(&buffer, Some(&desc), heap.cpu(direct)) };
+        let slot = bytes(heap.cpu(index));
+        assert_eq!(slot, bytes(heap.cpu(direct)), "copied as it was made");
         heap.null_raw_at(index);
         assert_ne!(bytes(heap.cpu(index)), slot, "another view since");
         // SAFETY: a plain query.
