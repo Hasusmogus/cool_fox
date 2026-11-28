@@ -9,7 +9,7 @@ through Wine. A fork of cool_fox/VIctory: https://github.com/dfmbrollins/victory
     use VIctory or VIctory-NVIDIA instead.
   * NO GAME FILES are included. You need your own dump: the folder that holds
     game_scarlett_master.exe and shaders.rpf.
-  * This is a test build: ~20 fps in our testing (RTX 5070), with visual bugs.
+  * This is a test build: ~24 fps in our testing (RTX 5070), with visual bugs.
 
 
 WHAT YOU NEED
