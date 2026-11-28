@@ -2781,6 +2781,92 @@ static LINE_LANDED: std::sync::Condvar = std::sync::Condvar::new();
 /// later one.
 static QUEUE_ORDER: Mutex<u64> = Mutex::new(0);
 
+/// Whether the list that sends changed ranges up to copies in the card's
+/// memory goes in front of the submission's own lists, in their
+/// `ExecuteCommandLists`, and not in an `ExecuteCommandLists` of its own
+/// just before (`VICTORY_CARD_SEND_ONE_EXECUTE=1`; off by default):
+/// one call to the driver less for each submission sent ahead that sends
+/// up. Under vkd3d-proton each call is a hop to its queue thread.
+///
+/// Only for submissions sent ahead, with `VICTORY_SEND_OWN` on and the
+/// diagnostics' check of sends (`upcheck`) off: there every state the send
+/// leaves is known here. With the relay, the order of the queue
+/// ([`QUEUE_ORDER`]) stays held from the taking of the ranges until the
+/// submission is on the queue, so no fetch of the thread that lands
+/// flights comes between the numbered send and the lists.
+///
+/// The lists of one `ExecuteCommandLists` run in order on the queue, but
+/// buffers decay to the common state only at the end of the call, not
+/// between its lists. So the send's list ends by moving the card sides it
+/// wrote and the hashes it stored back to the common state, as the end of
+/// a call of its own did implicitly: those transitions also make its
+/// copies, scatters and hash passes finish before any later list touches
+/// those buffers, and the submission's lists find them in the common state
+/// as they always did.
+///
+/// From claude-enjoyer-6205-victory v1.0 (GPL-3.0), there from Project
+/// Neptune VI v1.0.2; 49.1 -> 43.6 ms a frame on their AMD APU.
+fn card_one_execute() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    // Off by default: on NVIDIA under vkd3d-proton the closing barriers cost
+    // more than the call saved (runs 140-143: 40.1/40.7 ms off, 41.1/41.8 on).
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_SEND_ONE_EXECUTE").is_some_and(|v| v == "1"))
+}
+
+/// Sends to copies in the card's memory: in a call of their own, in the
+/// submission's call ([`card_one_execute`]).
+static CARD_CALLS: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// A send to copies in the card's memory left for the submission's own
+/// `ExecuteCommandLists` ([`card_one_execute`]): its list, and the order of
+/// the queue, held until it is on the queue.
+struct CardSend {
+    list: ID3D12CommandList,
+    _order: Option<std::sync::MutexGuard<'static, u64>>,
+}
+
+/// The barriers that take the buffers in `left` from the state each was
+/// left in back to the common state, each buffer once (its last state).
+fn back_to_common(left: &[(ID3D12Resource, D3D12_RESOURCE_STATES)]) -> Vec<D3D12_RESOURCE_BARRIER> {
+    closing_states(left.iter().map(|(buffer, state)| (buffer.as_raw() as usize, *state)))
+        .into_iter()
+        .filter_map(|(at, state)| {
+            let (buffer, _) = left.iter().find(|(b, _)| b.as_raw() as usize == at)?;
+            Some(transition(buffer, state, D3D12_RESOURCE_STATE_COMMON))
+        })
+        .collect()
+}
+
+/// Of buffers named with the state they were left in, in order: each once,
+/// with the last state named for it, none left in the common state.
+fn closing_states(left: impl IntoIterator<Item = (usize, D3D12_RESOURCE_STATES)>) -> Vec<(usize, D3D12_RESOURCE_STATES)> {
+    let mut out: Vec<(usize, D3D12_RESOURCE_STATES)> = Vec::new();
+    for (at, state) in left {
+        match out.iter_mut().find(|(a, _)| *a == at) {
+            Some(last) => last.1 = state,
+            None => out.push((at, state)),
+        }
+    }
+    out.retain(|(_, state)| *state != D3D12_RESOURCE_STATE_COMMON);
+    out
+}
+
+#[cfg(test)]
+mod card_send_tests {
+    use super::*;
+
+    /// Each buffer is taken back once, from the last state it was left in;
+    /// one already in the common state needs nothing.
+    #[test]
+    fn each_buffer_goes_back_from_its_last_state() {
+        let (dest, read, write) =
+            (D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        let got = closing_states([(1, dest), (2, write), (1, read), (3, D3D12_RESOURCE_STATE_COMMON), (4, write)]);
+        assert_eq!(got, [(1, read), (2, write), (4, write)]);
+        assert!(closing_states([]).is_empty());
+    }
+}
+
 /// Since the last frame-rate line, of the thread that lands flights
 /// ([`relay`]): landings, flights landed, microseconds it waited for the
 /// card with nothing to land, microseconds it waited for fetches of card
@@ -4509,7 +4595,14 @@ impl Host {
     /// `relay`).
     /// `picked`: ranges that may be written too, and ranges to look at
     /// (`crate::picked`).
-    fn card_before(&self, declared: &[Declared], picked: &crate::picked::Ranges, flown: bool) -> Option<CardPlan> {
+    fn card_before(
+        &self,
+        declared: &[Declared],
+        picked: &crate::picked::Ranges,
+        flown: bool,
+        defer: bool,
+        send: &mut Option<CardSend>,
+    ) -> Option<CardPlan> {
         use std::sync::Arc;
         if !crate::shadow::cards() {
             return None;
@@ -4553,12 +4646,19 @@ impl Host {
                 }
             }
         }
+        // In front of the submission's lists only where every state the send
+        // leaves is known here: its bytes from memory of the submission's own
+        // in an upload heap (no CPU side is read), no diagnostics' list.
+        let defer = defer && send::own() && !upcheck::on();
         let mut used: Vec<(bool, Prelude)> = Vec::new();
         let mut looks = None;
         // The bytes as they are now, whatever later submissions put there.
         let taking = crate::timeline::span("copies in the card's memory: taken");
         let own = if send::own() { send::take(self, &dirty) } else { None };
         taking.end();
+        // (Without the submission's own memory the CPU sides are read: not then.)
+        let defer = defer && (own.is_some() || dirty.iter().all(|d| d.1.is_empty()));
+        let mut deferred: Option<ID3D12CommandList> = None;
         if !dirty.is_empty() {
             let Some(sync) = work.sync.pop().or_else(|| self.make_prelude()) else {
                 fail(format_args!("no host list to bring host copies in the card's memory up to date"));
@@ -4580,8 +4680,11 @@ impl Host {
                     // card do them one after the other.
                     let mut sent = Vec::new();
                     let mut transitioned = Vec::new();
+                    // The buffers this list leaves in another state than the
+                    // common one, and that state (the last named counts).
+                    let mut left: Vec<(ID3D12Resource, D3D12_RESOURCE_STATES)> = Vec::new();
                     if let Some(own) = &own {
-                        own.record(self, list, &dirty, |shadow| looks.as_ref().is_some_and(|l| l.hold(shadow)));
+                        left = own.record(self, list, &dirty, |shadow| looks.as_ref().is_some_and(|l| l.hold(shadow)));
                     }
                     for (shadow, ranges) in &dirty {
                         let Some((staging, before, _)) = shadow.card_sides() else {
@@ -4646,12 +4749,31 @@ impl Host {
                         let runs = if joins { crate::shadow::joined_piece_runs(runs) } else { runs };
                         CARD_PASSES[0].fetch_add(runs.len() as u64, Ordering::Relaxed);
                         CARD_PASSES[1].fetch_add(runs.iter().map(|r| u64::from(r.pieces)).sum::<u64>(), Ordering::Relaxed);
+                        if !runs.is_empty() {
+                            // Read by the passes (promoted there, or moved
+                            // there by the sends); the hashes written.
+                            left.push((shadow.buffer.clone(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+                            left.push((before.clone(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+                        }
                         for run in runs {
                             card_pass(list, &run, size as u32, 0, 0);
                         }
                     }
+                    // Sharing the submission's call: back to the common
+                    // state, as the end of a call of its own leaves them
+                    // ([`card_one_execute`]).
+                    let back = if defer { back_to_common(&left) } else { Vec::new() };
+                    if !back.is_empty() {
+                        list.ResourceBarrier(&back);
+                    }
                     list.Close()?;
-                    self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+                    if defer {
+                        deferred = Some(list.cast()?);
+                        CARD_CALLS[1].fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+                        CARD_CALLS[0].fetch_add(1, Ordering::Relaxed);
+                    }
                     Ok(())
                 })()
             };
@@ -4660,7 +4782,12 @@ impl Host {
             }
             used.push((false, sync));
         }
-        drop(order);
+        // A send in front of the submission's lists keeps the order of the
+        // queue until it is on the queue ([`CardSend`]).
+        match deferred {
+            Some(list) => *send = Some(CardSend { list, _order: order }),
+            None => drop(order),
+        }
         let mut plan = CardPlan {
             ranges: Vec::new(),
             check: None,
@@ -5948,7 +6075,14 @@ impl Host {
             shadow.writing(*at, *len);
         }
         let declared = declared_writes(runs);
-        let card = self.card_before(&declared, &picked, flown);
+        let mut card_send: Option<CardSend> = None;
+        let card = self.card_before(&declared, &picked, flown, late && card_one_execute(), &mut card_send);
+        // The send to copies in the card's memory goes first, in the
+        // submission's own call ([`card_one_execute`]).
+        if let Some(send) = &card_send {
+            lists.insert(0, Some(send.list.clone()));
+            firsts.iter_mut().for_each(|first| *first += 1);
+        }
         // The sends are taken: from here on the references hold what the
         // copies in the lists put.
         for (shadow, at, bytes) in batch.placed.drain(..) {
@@ -5996,6 +6130,8 @@ impl Host {
                 for to in cuts.into_iter().chain([lists.len()]) {
                     self.queue.ExecuteCommandLists(&lists[from..to]);
                     from = to;
+                    // The order of the queue goes once the send is on it.
+                    card_send.take();
                 }
                 self.queue.Signal(&self.fence, *submitted)
             };
@@ -9340,6 +9476,12 @@ impl Meter {
                 crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
             );
             crate::tiles::status();
+            tracing::info!(
+                "sends to copies in the card's memory per frame: {:.1} in a call of their own, {:.1} in their submission's call \
+                 (VICTORY_CARD_SEND_ONE_EXECUTE)",
+                CARD_CALLS[0].swap(0, Ordering::Relaxed) as f64 / frames,
+                CARD_CALLS[1].swap(0, Ordering::Relaxed) as f64 / frames,
+            );
             {
                 let [queued, due, away, partly, oldest] =
                     [0, 1, 2, 3, 4].map(|i| crate::draw::HEAP_TEXTURES_QUEUE[i].load(Ordering::Relaxed));

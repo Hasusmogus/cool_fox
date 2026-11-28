@@ -267,7 +267,8 @@ impl Own {
         list: &ID3D12GraphicsCommandList,
         dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, usize)>)],
         looked: impl Fn(&Shadow) -> bool,
-    ) {
+    ) -> Vec<(ID3D12Resource, D3D12_RESOURCE_STATES)> {
+        let mut left = Vec::new();
         let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         let write = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         let dest = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -290,6 +291,10 @@ impl Own {
                 && (!copy.runs.is_empty() || copy.pairs.1 > 0)
             {
                 last.push(transition(&shadow.buffer, was, read));
+                state = Some(read);
+            }
+            if let Some(state) = state {
+                left.push((shadow.buffer.clone(), state));
             }
         }
         // SAFETY: the caller's; live objects.
@@ -321,6 +326,7 @@ impl Own {
                 list.ResourceBarrier(&last);
             }
         }
+        left
     }
 
     /// The memory, to be kept until the submission has run.

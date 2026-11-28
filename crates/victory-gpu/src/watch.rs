@@ -785,12 +785,14 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
 }
 
 /// Page ranges `(first, last)` the kernel refused to ask about in
-/// [`writes`] (`VICTORY_REFUSED_CACHE=0`: asked every time, as before).
+/// [`writes`] (`VICTORY_REFUSED_CACHE=1`; off by default: asked every time).
 static REFUSED: RwLock<Option<std::collections::HashSet<(usize, usize)>>> = RwLock::new(None);
 
 fn refused_cache() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_REFUSED_CACHE").is_none_or(|v| v != "0"))
+    // Off by default: neutral (runs 138/139), and fewer changes to suspect
+    // for the picture.
+    *ON.get_or_init(|| std::env::var_os("VICTORY_REFUSED_CACHE").is_some_and(|v| v == "1"))
 }
 
 fn refused_before(first: usize, last: usize) -> bool {
