@@ -2,6 +2,7 @@
 #   scripts\play.ps1 -Exe <path of your own copy's executable>
 # -Safe         without the newer, faster ways (the first thing to try when something is wrong)
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
+# -SkipRayWork  without -RayTracing: also skips the passes that only prepare for it (scripts/rt_work_off_hashes.txt)
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # -Record       writes down the pipelines the title creates (VICTORY_PIPELINE_BOOK=1), for -Warm
@@ -16,6 +17,7 @@ param(
     [switch]$Record,
     [switch]$Safe,
     [switch]$RayTracing,
+    [switch]$SkipRayWork,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
@@ -35,6 +37,13 @@ if ($Safe) {
     $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
 }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
+# Skinning for the acceleration structures and the probes' gather copy run whether or not anything traces rays:
+# 73 of 128 ms of the card's frame on an RTX 3050 Laptop 4 GB (Dathinel/victory-4gb). Not with -RayTracing, which reads them.
+if ($SkipRayWork -and -not $RayTracing) {
+    $list = Join-Path $PSScriptRoot 'rt_work_off_hashes.txt'
+    if (-not (Test-Path -LiteralPath $list)) { Write-Host "No $list."; exit 1 }
+    $settings.VICTORY_SKIP_PIPELINES = (Get-Content -LiteralPath $list -Raw).Trim()
+}
 if ($Record) { $settings.VICTORY_PIPELINE_BOOK = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
