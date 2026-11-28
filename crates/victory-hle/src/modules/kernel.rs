@@ -431,7 +431,14 @@ pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> 
     let as_set = *AS_SET.get_or_init(|| std::env::var_os("VICTORY_TITLE_PRIORITIES").is_some_and(|v| v == "0"));
     let priority = if as_set { priority } else { title_priority(priority) };
     // SAFETY: the title passes a thread handle.
-    unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
+    #[cfg(windows)]
+    return unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) };
+    // No host threads to set: report success.
+    #[cfg(not(windows))]
+    {
+        let _ = (thread, priority);
+        1
+    }
 }
 
 pub(crate) fn module() -> HleModule {
@@ -685,6 +692,7 @@ mod tests {
 
     /// The title's idle and lowest threads run below normal; the others as
     /// it sets them.
+    #[cfg(windows)]
     #[test]
     fn no_title_thread_waits_for_idle_processors() {
         let given: Vec<i32> = [-15, -2, -1, 0, 1, 2, 15].into_iter().map(title_priority).collect();

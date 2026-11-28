@@ -3,6 +3,16 @@
 //! Every command reads the user's own files and writes only to stdout or to
 //! the user's cache directory (outside the repository).
 
+// The title's code runs natively inside this process and calls the Windows
+// API, so the program is a Windows executable on every host. The libraries
+// still check on other targets.
+#[cfg(not(windows))]
+compile_error!(
+    "victory only builds for Windows (x86_64-pc-windows-msvc). On Linux, cross-compile with cargo-xwin: \
+     `cargo xwin build --release --locked -p victory --target x86_64-pc-windows-msvc`, \
+     then run it with scripts/play-proton.sh (see docs/linux.md)."
+);
+
 #[cfg(all(windows, feature = "agility-sdk"))]
 mod agility;
 mod census;

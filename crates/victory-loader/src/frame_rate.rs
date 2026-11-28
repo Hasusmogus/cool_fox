@@ -166,14 +166,7 @@ pub fn replacement(kind: Kind, rate: u32) -> Vec<u8> {
     }
 }
 
-/// What became of a site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Patched {
-    Done,
-    /// Its bytes are not the ones expected: left alone.
-    Differs,
-    Failed(&'static str),
-}
+pub use crate::patched::Patched;
 
 /// Makes each site of `sites` in the image of `size` bytes at `base` load
 /// `rate`. What became of each, said in the log too.
