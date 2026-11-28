@@ -298,7 +298,10 @@ fn unspill(
     // per instruction the scalar codes it writes.
     let mut stores = [false; 256];
     let mut other: [Option<usize>; 256] = [None; 256]; // the last such use
-    let mut used = [false; 128];
+    // (Every code a `Reg::S` can hold: a VOP3 compare's or `v_readlane_b32`'s
+    // destination is an 8-bit field, and one past the machine's codes was
+    // taken for a parked scalar and indexed out of bounds here.)
+    let mut used = [false; 256];
     let mut parks: Vec<Option<(bool, u8, u8, u32)>> = Vec::with_capacity(list.len());
     let mut written: Vec<Vec<u8>> = Vec::with_capacity(list.len());
     let mut read: Vec<Vec<u8>> = Vec::with_capacity(list.len());
@@ -1793,6 +1796,20 @@ mod tests {
         w.extend_from_slice(after);
         w.push(S_ENDPGM);
         build_words(&w, true)
+    }
+
+    /// A VOP3 compare whose 8-bit scalar destination is past the machine's
+    /// codes (133, an inline constant's) is built or refused, not a panic:
+    /// it reached `unspill` as a parked scalar's code, out of its 128 codes.
+    #[test]
+    fn a_compare_into_a_code_past_the_machines_does_not_panic() {
+        for wave64 in [false, true] {
+            let code: Vec<u8> = [0xD4EF_3085u32, 0xBE86_246A, S_ENDPGM] // v_cmp_tru_f16 133, ...
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect();
+            let _ = build(&code, wave64, 64);
+        }
     }
 
     fn skips(p: &Program) -> usize {
