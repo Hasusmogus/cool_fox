@@ -23,19 +23,19 @@ donations buy nothing but time spent on the next fix.
 Measured in the opening prison scenes (Series X profile, 1080p output) on the test machine below.
 Every number is from a scripted run: launch, wait for the scene, measure 150 s.
 
-| | Start of the tuning (run 56) | Now (runs 85–90) |
-|---|---|---|
-| Steady gameplay | ~128 ms a frame (7.8 fps) | **~51 ms (~19 fps)** |
-| Average over the run | 231 ms (4.3 fps) | ~62–67 ms (15–16 fps) |
-| Draws a frame | ~3,700 | ~4,000–4,800 |
+| | Start of the tuning (run 56) | Runs 85–90 | Now (runs 113–120) |
+|---|---|---|---|
+| Steady gameplay | ~128 ms a frame (7.8 fps) | ~51 ms (~19 fps) | **~43 ms (~23 fps)** |
+| GPU busy | | ~87–92 % | ~68 % |
+| Draws a frame | ~3,700 | ~4,000–4,800 | ~4,800 |
 
 **Working:** boot, menus, cutscenes, gameplay in the first areas, lit interiors, faces with moving
 mouths, NPC heads and clothing, audio.
 
-**Known issues:** some interiors still darker than on console; occasional blue reflections on eyes and
-small speckled patches; some texture and lighting pop-in after camera cuts. The frame is limited by the
-thread that prepares and submits GPU work (~50 ms of work a frame) and the GPU (~87 % busy):
-30 fps needs both cut by about a third.
+**Known issues:** some interiors still darker than on console; coloured speckles ("confetti") on one
+NPC's face in some runs; some texture and lighting pop-in after camera cuts; no heat haze (left out
+for speed, see below). The frame is now limited by the thread that prepares and submits GPU work
+(~41 ms of work a frame); the GPU has headroom (~68 % busy). 30 fps needs that thread ~10 ms faster.
 
 **Test machine:** Arch Linux, KDE Plasma (Wayland), AMD Ryzen 5 7600X (12 threads), NVIDIA GeForce
 RTX 5070 12 GB, Wine-staging 11.22 with a patched wineserver, vkd3d-proton (master), DXVK's dxgi.
@@ -57,6 +57,11 @@ Measured one at a time against the run before (frame times are steady gameplay u
 | Ray walks end at the root while the builder is off (`VICTORY_BVH_MISS=1`) | VIctory-NVIDIA 24a479d32, via [Victory-United](https://github.com/Fayberr/Victory-United) | card time not spent walking empty structures |
 | A wineserver that keeps a process's views in a tree (`linux/wine/`) | this fork | server CPU 40 % → 3–11 % (the title maps ~1,000 views a second) |
 | Wave64 programs on 32-lane NVIDIA cards: pair meetings, alternating exchange slots | this fork | a defrag shader 32 → 11.6 ms of card time |
+| The submitting thread looks only at card-side buffer copies touched since its last submission, not all ~4,000 | this fork | 51.3 → 49.1 ms (it was 10 % of that thread's time) |
+| Textures guarded instead of hashed whole at every check (`VICTORY_TEXTURE_GUARD=1`) | upstream switch, turned back on | 153 → 15 MB hashed a frame; preparing 46 → 36 ms |
+| Decal-heap defrag, heat haze and the water's tiled light left out (`VICTORY_LEAVE_OUT`; set it empty to run them) | VIctory-NVIDIA | the defrag alone was 13.7 ms of card time a frame: GPU 92 → 68 % busy, 48 → 45.5 ms |
+| The descriptor-heap thread makes a round after 1 ms without a submission (`VICTORY_HEAP_SYNC_EARLY=1`) | upstream switch, tuned | 44.6 → 43.3 ms |
+| 16-byte SSE2 `memcmp` under Wine (Wine's compares 8 bytes a step) | cool_fox d78b9eb5 | no measurable change here; kept |
 
 ### Picture
 
@@ -67,7 +72,9 @@ Measured one at a time against the run before (frame times are steady gameplay u
 | 16-bit values moved bit-exactly through typed views (`HostShader::half_views`) | [VIctory fork](https://github.com/fxceless/victory-fork) 58de9bf, pull request #927 | **mouths move** (the face network's indices) |
 | Console threads from a group counter in groups of several host waves | VIctory-NVIDIA 854f57f (Vice-Tay c125c0c) | NVIDIA's 2-D group layout no longer runs some threads twice |
 | Placed views ignore padding words | VIctory-NVIDIA PR #58 (project-flamingo) | confetti on faces, leaked views |
-| Reflections that miss take the ambient estimate, not the sky (`VICTORY_AMBIENT_SPECULAR=1`) | VIctory-NVIDIA 2db59d48, with a placed-depth fix here | blue-white eyes, blue blotches (in testing) |
+| Reflections that miss take the ambient estimate, not the sky (`VICTORY_AMBIENT_SPECULAR=1`) | VIctory-NVIDIA 2db59d48; the miss program's depth found at its slot in this fork's translation (1, 96) | **glowing blue-white eyes fixed** |
+| A slot keeps showing its old texture until the new one has uploaded (`VICTORY_KEEP_SHOWN=2`) | upstream switch, raised | far less confetti on faces in the diner cutscene |
+| Decal defrag and the water's tiled light left out (above) | VIctory-NVIDIA | no decal smears; no dark blocks on open water (the water is a little darker and bluer instead) |
 
 ### Stability
 
@@ -79,8 +86,11 @@ Measured one at a time against the run before (frame times are steady gameplay u
 | Copy range checks and late-write learning for card steps | [SlaktarnVI](https://github.com/Slaktarn700/SlaktarnVI) |
 
 Tried and left off by default because they measured neutral or worse here: Kelvaroq's mesh launch
-(`VICTORY_MESH_LAUNCH=1`), renderer ports 6 and 7, `VICTORY_PLACED_ORDER`, `VICTORY_ASK_EARLY`,
-`VICTORY_PAGE_WRITES=all`, `VICTORY_CARD_RESERVE_BUDGETS`. The code stays, for other machines.
+(`VICTORY_MESH_LAUNCH=1`), renderer ports 6 and 7 (`VICTORY_PORT_GUARD`, `VICTORY_PORT_JOURNAL`),
+`VICTORY_PLACED_ORDER`, `VICTORY_ASK_EARLY`, `VICTORY_PAGE_WRITES=all`, `VICTORY_CARD_RESERVE_BUDGETS`,
+`VICTORY_WIDE_MERGE=1`, write watches asked in pieces (`VICTORY_WATCH_CHUNK_MB`, upstream PR #71),
+more or fewer worker threads (`VICTORY_WIDE_WORKERS=8`, `VICTORY_THIN_THREADS=6`). The code stays, for
+other machines. `VICTORY_ASK_NORESET=1` froze the game here.
 
 ---
 
