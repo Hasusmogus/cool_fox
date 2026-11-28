@@ -44,6 +44,27 @@ pub const COMPARE: &str = "victory: card compare";
 /// An upload buffer contents come back through.
 const STAGING: u64 = 256 << 20;
 
+/// Replays own their heaps; resources no longer cross adapter boundaries.
+/// Keeping ALLOW_CROSS_ADAPTER after removing the heap's sharing flags
+/// makes ordinary placed-resource creation fail, including port buffers
+/// originally opened from CPU memory.
+fn replay_resource_desc(recorded: &wire::Desc) -> D3D12_RESOURCE_DESC {
+    let mut desc = gpu::to_desc(recorded);
+    desc.Flags.0 &= !D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER.0;
+    desc
+}
+
+fn replay_heap_flags(recorded: i32) -> D3D12_HEAP_FLAGS {
+    // The replay restores data immediately and has no residency queue.
+    // A heap left nonresident cannot be the destination of that copy.
+    let drop = D3D12_HEAP_FLAG_SHARED.0
+        | D3D12_HEAP_FLAG_ALLOW_DISPLAY.0
+        | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER.0
+        | D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT.0
+        | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED.0;
+    D3D12_HEAP_FLAGS(recorded & !drop)
+}
+
 /// Where buffers the CPU saw lie in a replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Buffers {
@@ -487,7 +508,8 @@ pub fn replay(folder: &Path, options: &Options) -> Result<Vec<(String, Report)>>
     } else {
         "unchanged"
     };
-    out.push((what.into(), player.run(options)?));
+    let report = player.run(options).map_err(|e| player.stage_error("running the frame", e))?;
+    out.push((what.into(), report));
     Ok(out)
 }
 
@@ -631,15 +653,18 @@ impl Player {
             *at = Instant::now();
         };
         let mut at = Instant::now();
-        player.make_resources(options.buffers, &options.only_buffers)?;
+        player.make_resources(options.buffers, &options.only_buffers)
+            .map_err(|e| player.stage_error("recreating resources", e))?;
         step("resources", &mut at);
-        player.make_pipelines(options.shaders.as_deref())?;
+        player.make_pipelines(options.shaders.as_deref())
+            .map_err(|e| player.stage_error("recreating pipelines", e))?;
         step("pipelines", &mut at);
-        player.make_descriptors()?;
+        player.make_descriptors().map_err(|e| player.stage_error("recreating descriptors", e))?;
         step("descriptors", &mut at);
-        player.load_contents()?;
+        player.load_contents().map_err(|e| player.stage_error("loading captured contents", e))?;
         step("contents", &mut at);
-        player.make_masters(options.buffers, options.restore)?;
+        player.make_masters(options.buffers, options.restore)
+            .map_err(|e| player.stage_error("making restoration copies", e))?;
         step("copies to restore from", &mut at);
         let steps: Vec<String> = steps
             .iter()
@@ -666,6 +691,32 @@ impl Player {
     fn note(&mut self, n: String) {
         tracing::warn!("{n}");
         self.notes.push(n);
+    }
+
+    fn stage_error(&self, stage: &str, error: anyhow::Error) -> anyhow::Error {
+        let mut details = self.info.as_ref().map(debug_messages).unwrap_or_default();
+        // SAFETY: DRED owns these records until the device is released.
+        // Only a bounded chain and valid nonempty histories are inspected.
+        unsafe {
+            if let Ok(dred) = self.device.cast::<ID3D12DeviceRemovedExtendedData1>()
+                && let Ok(out) = dred.GetAutoBreadcrumbsOutput1()
+            {
+                    let mut node = out.pHeadAutoBreadcrumbNode;
+                    for _ in 0..128 {
+                        if node.is_null() { break; }
+                        let n = &*node;
+                        if !n.pLastBreadcrumbValue.is_null() && !n.pCommandHistory.is_null() {
+                            let done = *n.pLastBreadcrumbValue;
+                            if done < n.BreadcrumbCount {
+                                let op = (*n.pCommandHistory.add(done as usize)).0;
+                                details.push(format!("DRED: command {done}/{} op {op}", n.BreadcrumbCount));
+                            }
+                        }
+                        node = n.pNext;
+                    }
+            }
+        }
+        error.context(format!("replay {stage}\n{}", details.join("\n")))
     }
 
     /// Says what of the frame is not there.
@@ -725,6 +776,13 @@ impl Player {
     }
 
     fn make_resources(&mut self, buffers: Buffers, only: &[String]) -> Result<()> {
+        let alias_targets: HashSet<u32> = self.commands.iter().flatten().flat_map(|c| match c {
+            Cmd::Barriers { all } => all.iter().flat_map(|b| match b {
+                Barrier::Alias { before, after, .. } => vec![*before, *after],
+                _ => Vec::new(),
+            }).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        }).collect();
         // A heap of memory the CPU sees becomes one the card may write too:
         // what the CPU wrote is put back by the card.
         let props = |p: &wire::HeapProps, buffer: bool| -> D3D12_HEAP_PROPERTIES {
@@ -747,8 +805,6 @@ impl Player {
                 _ => gpu::to_props(p),
             }
         };
-        // Flags a replay has no use for: sharing, display, not zeroed.
-        const DROP: i32 = 0x1 | 0x8 | 0x20 | 0x1000;
         let used_by_buffers_only: HashSet<u32> = {
             let mut textures = HashSet::new();
             for r in &self.frame.resources {
@@ -770,7 +826,7 @@ impl Player {
                 SizeInBytes: h.size,
                 Properties: props(&h.props, only.is_empty() && used_by_buffers_only.contains(&h.id)),
                 Alignment: h.alignment,
-                Flags: D3D12_HEAP_FLAGS(h.flags & !DROP),
+                Flags: replay_heap_flags(h.flags),
             };
             let mut heap: Option<ID3D12Heap> = None;
             // SAFETY: plain creation.
@@ -788,7 +844,7 @@ impl Player {
                 let m = moves.entry(format!("{seen:?}")).or_insert((0u32, 0u64));
                 *m = (m.0 + 1, m.1 + r.desc.width);
             }
-            let desc = gpu::to_desc(&r.desc);
+            let desc = replay_resource_desc(&r.desc);
             let mut made: Option<ID3D12Resource> = None;
             let clear: Option<D3D12_CLEAR_VALUE> = r.clear.map(|c| {
                 // SAFETY: 20 bytes that were a clear value.
@@ -818,7 +874,7 @@ impl Player {
                         };
                         self.device.CreateCommittedResource(
                             &p,
-                            D3D12_HEAP_FLAGS(flags & !DROP),
+                            replay_heap_flags(*flags),
                             &desc,
                             state,
                             clear,
@@ -830,14 +886,34 @@ impl Player {
                             Type: D3D12_HEAP_TYPE_DEFAULT,
                             ..Default::default()
                         };
-                        self.device.CreateCommittedResource(
-                            &p,
-                            D3D12_HEAP_FLAG_NONE,
-                            &desc,
-                            D3D12_RESOURCE_STATE_COMMON,
-                            None,
-                            &mut made,
-                        )
+                        if alias_targets.contains(&r.id) {
+                            // The recorder uses BackBuffer for every resource
+                            // first seen in a command, including untracked
+                            // placed textures. A committed stand-in cannot be
+                            // named by its recorded aliasing barriers.
+                            let allocation = self.device.GetResourceAllocationInfo(0, &[desc]);
+                            let mut heap: Option<ID3D12Heap> = None;
+                            self.device.CreateHeap(&D3D12_HEAP_DESC {
+                                SizeInBytes: allocation.SizeInBytes,
+                                Alignment: allocation.Alignment,
+                                Properties: p,
+                                Flags: D3D12_HEAP_FLAG_NONE,
+                            }, &mut heap)?;
+                            let heap = heap.context("no heap for an untracked alias resource")?;
+                            let result = self.device.CreatePlacedResource(&heap, 0, &desc,
+                                D3D12_RESOURCE_STATE_COMMON, None, &mut made);
+                            self._heaps.insert(r.id, heap);
+                            result
+                        } else {
+                            self.device.CreateCommittedResource(
+                                &p,
+                                D3D12_HEAP_FLAG_NONE,
+                                &desc,
+                                D3D12_RESOURCE_STATE_COMMON,
+                                None,
+                                &mut made,
+                            )
+                        }
                     }
                 }
             };
@@ -871,7 +947,7 @@ impl Player {
             }
         }
         if failed > 0 {
-            self.note(format!("{failed} resources could not be made again"));
+            bail!("{failed} resources could not be made again; the incomplete frame is not submitted");
         }
         if buffers != Buffers::AsRecorded {
             self.notes.push(format!(
@@ -3501,6 +3577,58 @@ fn debug_messages(q: &ID3D12InfoQueue) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cross_adapter_buffer_replays_in_an_owned_heap() {
+        let Some(host) = crate::host::host() else { return };
+        let recorded = gpu::from_desc(&D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER, Alignment: 65536,
+            Width: 65536, Height: 1, DepthOrArraySize: 1, MipLevels: 1,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER, ..Default::default()
+        });
+        let mut heap: Option<ID3D12Heap> = None;
+        let mut buffer: Option<ID3D12Resource> = None;
+        // SAFETY: a complete owned heap and an in-range placed buffer. The
+        // recorded cross-adapter buffer is recreated without shared memory.
+        unsafe {
+            host.device.CreateHeap(&D3D12_HEAP_DESC {
+                SizeInBytes: 65536, Alignment: 65536,
+                Properties: D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+                Flags: replay_heap_flags(D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS.0
+                    | D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT.0
+                    | D3D12_HEAP_FLAG_SHARED.0
+                    | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER.0),
+            }, &mut heap).unwrap();
+            host.device.CreatePlacedResource(heap.as_ref().unwrap(), 0,
+                &replay_resource_desc(&recorded), D3D12_RESOURCE_STATE_COPY_DEST,
+                None, &mut buffer).unwrap();
+        }
+        let buffer = buffer.unwrap();
+        let (upload, data) = host.upload_buffer(256).unwrap();
+        let readback = host.read_back_buffer(256).unwrap();
+        let list = host.new_list().unwrap();
+        let expected: Vec<u32> = (0..64).map(|i| 0x1234_0000 + i).collect();
+        // SAFETY: upload and readback mappings cover all 64 words, and
+        // resources and the heap outlive the synchronous GPU submission.
+        unsafe {
+            std::ptr::copy_nonoverlapping(expected.as_ptr().cast::<u8>(), data, 256);
+            list.list.CopyBufferRegion(&buffer, 0, &upload, 0, 256);
+            list.list.ResourceBarrier(&[crate::host::transition(&buffer,
+                D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+            list.list.CopyBufferRegion(&readback, 0, &buffer, 0, 256);
+        }
+        list.close();
+        host.execute_sync_internal(&list);
+        unsafe {
+            let mut data = std::ptr::null_mut();
+            readback.Map(0, None, Some(&mut data)).unwrap();
+            assert_eq!(std::slice::from_raw_parts(data.cast::<u32>(), 64), expected);
+            readback.Unmap(0, None);
+            assert!(host.device.GetDeviceRemovedReason().is_ok());
+        }
+    }
 
     #[test]
     fn captures_are_found() {
