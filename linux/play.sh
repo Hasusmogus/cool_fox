@@ -73,6 +73,10 @@ export VICTORY_DATA_DIR="$(winpath "$WORK/victory-data")"
 # The heaps' records thread makes a round of its own after 1 ms without a submission (default 4),
 # so less is left for the submission to wait for: run 115, 44.6 -> 43.3 ms a frame.
 : "${VICTORY_HEAP_SYNC_EARLY:=1}"
+# Threads that translate the title's lists: 3 on CPUs of up to 12 threads, 6 above (TRIDENT's
+# advice). Fewer than the runtime's 8 leave cores to the submitting thread's helpers: run 127,
+# 43.4 -> 42.7 ms on a 6-core Ryzen 5 7600X (6 threads measured worse there).
+: "${VICTORY_THIN_THREADS:=$(( $(nproc) <= 12 ? 3 : 6 ))}"
 # Textures are guarded (a write faults once and is noted) instead of hashed whole at every
 # check: ~10 ms less preparing a frame (run 106: textures 138 -> 15 MB, 8 -> 2 ms). The diner
 # confetti comes and goes with it on or off (run 110 had it off), so it is not the guard's.
