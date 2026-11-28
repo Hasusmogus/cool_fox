@@ -23,17 +23,24 @@ donations buy nothing but time spent on the next fix.
 Measured in the opening prison scenes (Series X profile, 1080p output) on the test machine below.
 Every number is from a scripted run: launch, wait for the scene, measure 150 s.
 
-| | Start of the tuning (run 56) | Runs 85–90 | Runs 113–120 | Now (runs 127–131) |
+| | Start of the tuning (run 56) | Runs 85–90 | Runs 113–120 | Now (runs 138–157) |
 |---|---|---|---|---|
-| Steady gameplay | ~128 ms a frame (7.8 fps) | ~51 ms (~19 fps) | ~43 ms (~23 fps) | **~41.8 ms (~24 fps)** |
-| GPU busy | | ~87–92 % | ~68 % | ~70–78 % |
-| Draws a frame | ~3,700 | ~4,000–4,800 | ~4,800 | ~4,800 |
+| Steady gameplay | ~128 ms a frame (7.8 fps) | ~51 ms (~19 fps) | ~43 ms (~23 fps) | **~41.5 ms (~24 fps)** |
+| GPU busy | | ~87–92 % | ~68 % | ~74–76 % |
+| Draws a frame | ~3,700 | ~4,000–4,800 | ~4,800 | ~4,100 |
+| VRAM in use (of 12 GB) | | | | ~10.8–11.3 GB, peaks ~11.6 GB |
+
+"Steady" is the mean of a run's last ten frame-rate lines; the first lines of a run include the heavy
+start of the cutscene. Runs since 153 start from the same prologue save every time.
+
+Past the prologue a tester drove the boat in the open water at **18–23 fps**.
 
 **Working:** boot, menus, cutscenes, gameplay in the first areas, lit interiors, faces with moving
 mouths, NPC heads and clothing, audio.
 
-**Known issues:** some interiors a little darker than on console (much better since the reflection fix); coloured speckles ("confetti") on one
-NPC's face in some runs; some texture and lighting pop-in after camera cuts; no heat haze (left out
+**Known issues:** some interiors a little darker than on console (much better since the reflection fix); coloured speckles ("confetti") on the
+diner waitress's face in most runs (under investigation); graphical issues in the city after the prologue;
+controller vibration only in the main menu; some texture and lighting pop-in after camera cuts; no heat haze (left out
 for speed, see below). The frame is now limited by the thread that prepares and submits GPU work
 (~38 ms of work a frame); the GPU has headroom. 30 fps needs that thread ~8.5 ms faster.
 
@@ -88,6 +95,7 @@ Measured one at a time against the run before (frame times are steady gameplay u
 | No arena storm when the low address range is full; upload room reserved at start | VIctory-NVIDIA PR #88, e69e39c5 |
 | Mono convolutions in the audio DSP (phone calls, TVs, reverb; not yet verified here) | VIctory-NVIDIA PR #77 |
 | Copy range checks and late-write learning for card steps | [SlaktarnVI](https://github.com/Slaktarn700/SlaktarnVI) |
+| A card-side buffer copy goes up at most once per submission (it could be listed twice, with conflicting barriers); write watches asked in pieces no longer drop the pages earlier pieces reset | this fork, found by a code review of the submitting-thread changes |
 
 Tried and left off by default because they measured neutral or worse here: Kelvaroq's mesh launch
 (`VICTORY_MESH_LAUNCH=1`), renderer ports 6 and 7 (`VICTORY_PORT_GUARD`, `VICTORY_PORT_JOURNAL`),
@@ -95,7 +103,14 @@ Tried and left off by default because they measured neutral or worse here: Kelva
 `VICTORY_WIDE_MERGE=1`, write watches asked in pieces (`VICTORY_WATCH_CHUNK_MB`, upstream PR #71),
 more worker threads (`VICTORY_WIDE_WORKERS=8`, `VICTORY_VIEW_THREADS=8`). The code stays, for other
 machines. `VICTORY_ASK_NORESET=1` froze the game here. Also tried and not kept: mimalloc in place of
-Wine's heap (no change) and retiring descriptor resources in batches (glitches).
+Wine's heap (no change) and retiring descriptor resources in batches (glitches). Since v0.1.1, also measured
+and left opt-in: the card-memory send inside the submission's own `ExecuteCommandLists`
+(`VICTORY_CARD_SEND_ONE_EXECUTE=1`, from Project Neptune VI via
+[claude-enjoyer-6205-victory](https://github.com/claude-enjoyer-6205/claude-enjoyer-6205-victory): ~1 ms
+slower on NVIDIA), refused write-watch ranges remembered (`VICTORY_REFUSED_CACHE=1`, neutral), a
+lock-free look at descriptor slots (`VICTORY_KEEP_QUICK=1`, neutral, one frozen run), and decoration
+bakes checking their sources first (`VICTORY_BAKE_SOURCES=1`, from foxhound via the same fork: the
+confetti stayed).
 
 ---
 
@@ -134,7 +149,7 @@ first. `CONSOLE=series-s` selects the Series S profile.
 - After a change to the translator, vkd3d-proton or the shader cache key, run `warm --again` in full and
   measure on the second run: the pipeline library is rebuilt by the first.
 - `linux/tools/ab-run.sh <name> [VAR=value ...]` runs one scripted measurement (frame time, GPU load,
-  two screenshots), for comparing one switch at a time.
+  two screenshots, RAM and VRAM), for comparing one switch at a time.
 
 ---
 
@@ -154,6 +169,9 @@ commit references in the history.
   of the memory wall.
 - **[SlaktarnVI](https://github.com/Slaktarn700/SlaktarnVI)** (Slaktarn700): card-step learning.
 - **[Victory-United](https://github.com/Fayberr/Victory-United)** (Fayberr): the BVH-miss switch's port.
+- **[TRIDENT](https://github.com/ECHOZwei/TRIDENT)** (ECHOZwei): the release profile and thread advice.
+- **[claude-enjoyer-6205-victory](https://github.com/claude-enjoyer-6205/claude-enjoyer-6205-victory)**: the
+  ported (opt-in) card send and bake-source check, and its measured dead ends.
 - The community testers and writers whose measurements and write-ups pointed at the drains, the memory
   profile and the watchdog.
 
