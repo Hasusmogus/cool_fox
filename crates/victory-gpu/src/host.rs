@@ -3453,21 +3453,34 @@ static WIDE_WRITES: Mutex<Option<std::collections::HashMap<(usize, usize, usize)
 /// `address`, through a root view of `pipeline`, a view in a table (0) or a
 /// raw address (1).
 #[cfg(feature = "diagnostics")]
-pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize) {
-    if len < 1 << 20 {
+pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize, table: bool) {
+    // Also the small ones (a page or less): fills of a few hundred bytes
+    // wait for flights that declare exactly their range, and nothing said
+    // which pass declares it.
+    // Asked for (`VICTORY_BLAME_SMALL=1`): thousands of small views a frame
+    // would be noted under this lock otherwise, in runs that measure.
+    static SMALL: OnceLock<bool> = OnceLock::new();
+    let small = len <= 4096 && *SMALL.get_or_init(|| std::env::var_os("VICTORY_BLAME_SMALL").is_some_and(|v| v == "1"));
+    if len < 1 << 20 && !small {
         return;
     }
     let mut all = WIDE_WRITES.lock().unwrap_or_else(|e| e.into_inner());
     let e = all
         .get_or_insert_with(Default::default)
-        .entry((address as usize, (address + len) as usize, pipeline))
+        // (A table's writes keyed apart from a root view's of the same pipeline.)
+        .entry((address as usize, (address + len) as usize, pipeline ^ usize::from(table) << (usize::BITS - 1)))
         .or_insert_with(|| {
-            let shaders = match pipeline {
-                0 => "a view in a table".into(),
-                1 => "a raw address".into(),
-                p => crate::pipeline::host_pipeline(p as crate::object::This).map_or_else(String::new, |p| {
+            let hashes = |p: usize| {
+                crate::pipeline::host_pipeline(p as crate::object::This).map_or_else(String::new, |p| {
                     p.stages.iter().map(|s| s.shader.hash.to_string()).collect::<Vec<_>>().join("+")
-                }),
+                })
+            };
+            let shaders = match (pipeline, table) {
+                (0, _) => "a view in a table".into(),
+                (1, _) => "a raw address".into(),
+                // What declares the range, not that it wrote there.
+                (p, true) => format!("a view in a table of {}", hashes(p)),
+                (p, false) => hashes(p),
             };
             (0, shaders)
         });
@@ -3546,7 +3559,7 @@ fn log_blame(frames: f64) {
             passes.into_iter().take(5).map(|(shaders, n)| format!("{shaders} {:.1}x", n as f64 / frames)).collect();
         tracing::info!(
             "waited for flights, per frame: {:.1} ms in {:.2} waits for {kind} +{len:#x} (last at {at:#x}), in shader writes declared \
-             over {from:#x}+{size:#x} (declared per frame over a megabyte or more there, by shader: {}){}{why}",
+             over {from:#x}+{size:#x} (declared per frame over a megabyte or more, or a page or less, there, by shader: {}){}{why}",
             us as f64 / 1e3 / frames,
             n as f64 / frames,
             passes.join(", "),
@@ -3644,7 +3657,22 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
             }
         }
     }
-    (!placed.is_empty() && place::read_by(runs, placed)).then_some(WHY_READ)
+    if placed.is_empty() {
+        return None;
+    }
+    // Named like the other reads: unnamed, this wait was counted as "a host
+    // copy of what a copy done on the card wrote", which it is not. The
+    // destination named is one a step reads, not merely the first collected.
+    #[cfg(feature = "diagnostics")]
+    {
+        let read = placed.iter().copied().find(|&range| place::read_by(runs, vec![range]))?;
+        if count {
+            blame("a read of a buffer copy's destination at its place", written, read.0, read.1 - read.0);
+        }
+        Some(WHY_READ)
+    }
+    #[cfg(not(feature = "diagnostics"))]
+    place::read_by(runs, placed).then_some(WHY_READ)
 }
 
 /// With flights in the air, after the submission's write-watch asking:

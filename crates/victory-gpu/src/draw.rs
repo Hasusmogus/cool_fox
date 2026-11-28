@@ -207,6 +207,11 @@ thread_local! {
     /// While a stage's tables are walked (`State::tables`): whether that
     /// stage's shader can store to buffers (`Translated::stores`).
     static STORES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Diagnostics, beside `STORES`: the pipeline whose tables are walked
+    /// (0: none), to name what declares a small write through a table view
+    /// (`VICTORY_BLAME_SMALL`).
+    #[cfg(feature = "diagnostics")]
+    static WRITER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// While `State::early_textures` runs the texture pass: the
     /// milliseconds and the bytes that run may take, in place of the
     /// pass's own per frame.
@@ -1779,6 +1784,8 @@ impl State {
         for stage in &p.stages {
             let t = stage.translated();
             STORES.set(t.stores);
+            #[cfg(feature = "diagnostics")]
+            WRITER.set(self.pipeline);
             if t.stores && crate::picked::on() && crate::picked::picks(&stage.shader, &t.picks) {
                 crate::picked::runs_in(list);
             }
@@ -1786,6 +1793,8 @@ impl State {
             #[cfg(feature = "diagnostics")]
             self.trace_buffer_placement(&t.tables, compute, &stage.shader.hash);
             STORES.set(true);
+            #[cfg(feature = "diagnostics")]
+            WRITER.set(0);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
                 return false;
@@ -2053,7 +2062,7 @@ impl State {
             s.refresh(list, a, len);
             if writes {
                 #[cfg(feature = "diagnostics")]
-                crate::host::wide_write(a, len, self.pipeline);
+                crate::host::wide_write(a, len, self.pipeline, false);
                 s.gpu_writes(list, a, len);
             }
         };
@@ -4992,8 +5001,10 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
             // A shader that cannot store to buffers leaves the range as
             // the title has it: nothing to find afterwards.
             if STORES.get() || !write_skip() {
+                // A small one is named by its pipeline, if a table's walk
+                // set it; the wide ones stay "a view in a table".
                 #[cfg(feature = "diagnostics")]
-                crate::host::wide_write(address, len, 0);
+                crate::host::wide_write(address, len, if len <= 4096 { WRITER.get() } else { 0 }, true);
                 shadow.gpu_writes(list, address, len);
             } else {
                 #[cfg(feature = "diagnostics")]
