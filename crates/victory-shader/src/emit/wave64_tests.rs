@@ -145,6 +145,59 @@ fn lowered_counted(
     })
 }
 
+/// Native thread coordinates must cover the group exactly once even when
+/// its final host wave has fewer than 32 lanes. Padding detects writes
+/// outside the group as well as holes in the valid range.
+#[test]
+#[ignore = "requires a hardware GPU with 32-lane waves"]
+fn partial_host_waves_cover_every_thread_once() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let host = Host::new(false).expect("hardware GPU required");
+    const GROUPS: u32 = 128;
+    const STRIDE: usize = 128;
+    for shape in [
+        [16, 1, 1], [8, 2, 1], [48, 1, 1], [8, 6, 1], [33, 1, 1], [80, 1, 1], [96, 1, 1],
+    ] {
+        let mut n = native_of(&[
+            0xD765_0002, 0x0001_00C1, // v_mbcnt_lo v2, -1, 0
+            0xD766_0002, 0x0002_04C1, // v_mbcnt_hi v2, -1, v2
+            0xD569_0003, 0x0002_0200, // v_mul_lo v3, s0 (width), v1 (y)
+            0x4A06_0700,              // v_add v3, v0 (x), v3
+            0x7E08_0206,              // v_mov v4, s6 (saved group x)
+            0x3408_0887,              // v_lshlrev v4, 7, v4
+            0x4A08_0903,              // v_add v4, v3, v4
+            0x3408_0882,              // v_lshlrev v4, 2, v4
+            0x4A04_0481,              // v_add v2, 1, v2
+            0xE070_1000, 0x8002_0204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+        ], true, shape.into_iter().product());
+        // Save the system group ID before native_of's table setup uses s5.
+        n.code.splice(0..0, 0xBE86_0305u32.to_le_bytes());
+        n.io = StageIo::Cs(ComputeIo {
+            rsrc2: (5 << 1) | (1 << 7) | (1 << 11),
+            threads: shape,
+        });
+        let p = ir::build(&n.code, n.wave64, n.vgprs).expect("IR");
+        let mut shader = lowered(&n, &p, &HashSet::new()).expect("lower");
+        validator::Validator::load(validator::Validator::default_path().as_deref())
+            .expect("DXIL validator").validate(&mut shader.dxil).expect("valid DXIL");
+        let (root, pso) = host.compute_pipeline(&shader).expect("32-lane pipeline");
+        let mut ud = vec![0; shader.user_data_dwords().max(1) as usize];
+        ud[0] = shape[0];
+        let out = host.dispatch(&root, &pso, &Dispatch {
+            roots: vec![(0, Root::Constants(ud))],
+            views: &[View::RawUav(GROUPS * STRIDE as u32)],
+            samplers: &[], groups: [GROUPS, 1, 1],
+        }).expect("dispatch");
+        let count = shape.into_iter().product::<u32>() as usize;
+        for (group, words) in out[0].chunks_exact(STRIDE).enumerate() {
+            for (thread, &value) in words.iter().enumerate() {
+                let expected = if thread < count { (thread % 64 + 1) as u32 } else { 0 };
+                assert_eq!(value, expected, "shape {shape:?}, group {group}, thread {thread}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_sum_of_halves_over_the_wave_is_the_consoles_tree_bit_for_bit() {
     // thread t holds the 16-bit float with bits 0x3C00 + 37 t (1.0 and up, with odd

@@ -76,6 +76,11 @@ for setting in \
     [[ -n ${!name:-} ]] || export "$setting"
 done
 [[ -n ${VICTORY_LOG:-} || -n ${RUST_LOG:-} ]] || export VICTORY_LOG=warn
+# Wine writes a `fixme` line for every call it does not implement, and the
+# layer makes some in hot paths: one session logged 33,198 (#116). Proton
+# defaults to this already; plain wine (VICTORY_WINE=1) does not.
+: "${WINEDEBUG:=-all}"
+export WINEDEBUG
 # On an NVIDIA card the title's own upscaler (VICTORY_UPSCALER=6), not
 # FidelityFX's (7, the title's choice on Series S): FidelityFX's is a network
 # of 8-bit dot products, and its eight largest layers took 120 of the 200 ms
@@ -86,9 +91,11 @@ if [[ -z ${VICTORY_UPSCALER:-} && -e /proc/driver/nvidia/version ]]; then
 fi
 # On a host of 32-lane waves (NVIDIA) the decal heap's CS_DefragHeap_ComputeRelocations
 # (02384a60fda6f2d0) runs only in a form whose two host waves meet by spinning: 18.6 ms of an
-# RTX 5060's frame, the costliest command (VICTORY_GPU_TIMING). Left out, as VIctory-NVIDIA's
-# launcher does: prologue 102 -> 91 ms a frame, waits for the card 22.7 -> 5.2 ms, same pictures.
-if [[ -z ${VICTORY_SKIP_PIPELINES:-} && -e /proc/driver/nvidia/version ]]; then
+# RTX 5060's frame, the costliest command (VICTORY_GPU_TIMING). VICTORY_SKIP_DEFRAG=1 leaves it
+# out, as VIctory-NVIDIA's launcher does: prologue 102 -> 91 ms a frame, waits for the card
+# 22.7 -> 5.2 ms. Not by default: without it decals the heap moves come out black (beer
+# bottles' labels in the boat mission, #94).
+if [[ ${VICTORY_SKIP_DEFRAG:-0} == 1 && -z ${VICTORY_SKIP_PIPELINES:-} ]]; then
     export VICTORY_SKIP_PIPELINES=02384a60fda6f2d0
 fi
 

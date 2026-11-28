@@ -200,7 +200,7 @@ What each part does today and what it still needs:
 | Runtime services | One signed-in offline user, licences, packages, saves that survive a kill at any step, text entry dialog | Speech is silent; the dialog and relaunch are untested live |
 | Network | Offline by design: the title cannot reach the network | – |
 | Files and streaming | Archives and streamed data read, zlib and BCPack decoded in parallel | Loading is limited by writes into title memory |
-| Input | XInput pads, keyboard, keyboard stand-in pad | Trigger rumble |
+| Input | XInput pads, DualSense (USB and Bluetooth), keyboard, keyboard stand-in pad | Trigger rumble |
 | Audio | Menu, video and loading sound; XMA voices and Opus streams decode | Reverb is silent; Opus results unverified against the title |
 | GPU: menus | Draws, compute and presentation on host D3D12; only changed title memory is copied | Frame pacing drifts on one screen in release builds |
 | GPU: world | The scene is drawn and presented: mesh pipelines, indirect execution, views the shaders pick from the heap themselves, title memory read by address (ray-tracing structures), depth written from compute, pipelines pre-built or made by worker threads and kept on disk | Lighting (surfaces are unlit) and some missing geometry; frames take 1-2 s; draws of untranslated shaders are dropped; real queries, depth bounds, HDR and scaling are missing |
@@ -250,8 +250,16 @@ limits them. This scales the displayed image; it does not change the
 console render resolution or the swap-chain buffers. With the variable
 unset, window sizing is unchanged.
 
-Input: XInput pads. With none connected the keyboard is a pad while the
-title's window has focus:
+XInput pads and Sony DualSense controllers feed the same in-game pad by default.
+DualSense works over USB and Bluetooth. The keyboard also controls that pad
+while the title's window has focus.
+
+At launch, VIctory checks for a live USB or Bluetooth report from a DualSense.
+An active controller selects PlayStation button prompts and the DualSense diagram
+in the controls menu for supported packages. A powered-off controller selects Xbox artwork.
+VIctory builds two read-only views in its cache (about 460 MiB for 1.0.2.1).
+The game's original files stay in place. Set `VICTORY_DUALSENSE_PROMPTS=0`
+for Xbox artwork or `1` to force PlayStation artwork at the next launch.
 
 | Keys | Pad |
 |------|-----|

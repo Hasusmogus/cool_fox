@@ -43,6 +43,24 @@ pub(super) fn on() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_COPIES_IN_PLACE").is_none_or(|v| v != "0"))
 }
 
+/// Buffers promoted by a copy decay at an ExecuteCommandLists boundary,
+/// not between lists in one call. Keep a list with copies at such a
+/// boundary on both sides: earlier shader reads must decay before a copy,
+/// and copy destinations must decay before later shader reads.
+pub(super) fn submission_parts(parts: &[usize], copies: impl IntoIterator<Item = bool>) -> Vec<usize> {
+    let copies: Vec<_> = copies.into_iter().collect();
+    let mut cuts = parts.to_vec();
+    for (n, copied) in copies.iter().enumerate() {
+        if *copied {
+            cuts.extend([n, n + 1]);
+        }
+    }
+    cuts.retain(|&n| n > 0 && n < copies.len());
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts
+}
+
 /// The most bytes copied out of memory shaders do not write.
 const MOST: usize = 8 << 20;
 
@@ -301,6 +319,103 @@ impl HostList {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_lists_keep_existing_submission_boundaries() {
+        assert_eq!(submission_parts(&[2], [false; 4]), [2]);
+        assert_eq!(submission_parts(&[2], [true, false, true, false]), [1, 2, 3]);
+        assert_eq!(submission_parts(&[], [false, true, false, false]), [1, 2]);
+        assert!(submission_parts(&[], [true]).is_empty());
+    }
+
+    /// Copies and shader reads in different lists have the same order as
+    /// the failing capture: a copied argument buffer is read later, then
+    /// copied again. No explicit transitions of the input buffer are used.
+    #[test]
+    #[ignore = "requires diagnostics and VICTORY_D3D12_DEBUG=1"]
+    fn copy_list_boundaries_allow_later_srv_reads() {
+        let host = host().expect("real GPU required");
+        let _: ID3D12InfoQueue = host.device.cast().expect("enable the debug layer");
+        let _ = host.log_messages();
+        let code = compile(r#"
+#define RS "SRV(t0), UAV(u0), RootConstants(num32BitConstants=1,b0)"
+ByteAddressBuffer input : register(t0);
+RWByteAddressBuffer output : register(u0);
+cbuffer C : register(b0) { uint slot; };
+[RootSignature(RS)] [numthreads(1,1,1)]
+void main() { output.Store(slot * 4, input.Load(0)); }
+"#, windows::core::s!("main"), windows::core::s!("cs_5_1")).unwrap();
+        // SAFETY: the shader bytecode includes its root signature.
+        let root: ID3D12RootSignature = unsafe { host.device.CreateRootSignature(0, &code).unwrap() };
+        let pso: ID3D12PipelineState = unsafe {
+            host.device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            }).unwrap()
+        };
+        for split in [false, true] {
+            let (input, output) = (host.uav_buffer(256).unwrap(), host.uav_buffer(256).unwrap());
+            let (upload, data) = host.upload_buffer(256).unwrap();
+            let back = host.read_back_buffer(256).unwrap();
+            let mut lists = Vec::new();
+            // SAFETY: live buffers cover all copies and views. Upload data
+            // stays immutable until the queue's fence completes.
+            unsafe {
+                data.cast::<u32>().write(0x12345678);
+                data.cast::<u32>().add(1).write(0xabcdef01);
+                for slot in 0..2 {
+                    let copy = host.new_list().unwrap();
+                    copy.list.CopyBufferRegion(&input, 0, &upload, slot as u64 * 4, 4);
+                    copy.list.Close().unwrap();
+                    lists.push(copy);
+                    let read = host.new_list().unwrap();
+                    read.list.SetComputeRootSignature(&root);
+                    read.list.SetPipelineState(&pso);
+                    read.list.SetComputeRootShaderResourceView(0, input.GetGPUVirtualAddress());
+                    read.list.SetComputeRootUnorderedAccessView(1, output.GetGPUVirtualAddress());
+                    read.list.SetComputeRoot32BitConstant(2, slot, 0);
+                    read.list.Dispatch(1,1,1);
+                    if slot == 1 {
+                        read.list.ResourceBarrier(&[transition(&output,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                        read.list.CopyBufferRegion(&back, 0, &output, 0, 8);
+                    }
+                    read.list.Close().unwrap();
+                    lists.push(read);
+                }
+                let queue: ID3D12CommandQueue = host.device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
+                    Type: D3D12_COMMAND_LIST_TYPE_DIRECT, ..Default::default()
+                }).unwrap();
+                let fence: ID3D12Fence = host.device.CreateFence(0,D3D12_FENCE_FLAG_NONE).unwrap();
+                let event = CreateEventW(None,false,false,None).unwrap();
+                let cmds: Vec<_> = lists.iter().map(|l| Some(l.list.cast().unwrap())).collect();
+                let cuts = if split { submission_parts(&[], [true, false, true, false]) } else { Vec::new() };
+                let mut from = 0;
+                for to in cuts.into_iter().chain([cmds.len()]) {
+                    queue.ExecuteCommandLists(&cmds[from..to]);
+                    from = to;
+                }
+                queue.Signal(&fence,1).unwrap();
+                fence.SetEventOnCompletion(1,event).unwrap();
+                assert_eq!(WaitForSingleObject(event,10_000), windows::Win32::Foundation::WAIT_OBJECT_0);
+                windows::Win32::Foundation::CloseHandle(event).unwrap();
+                host.device.GetDeviceRemovedReason().unwrap();
+                let messages = host.log_messages();
+                if split {
+                    assert_eq!(messages, None);
+                    let mut data = std::ptr::null_mut();
+                    back.Map(0,None,Some(&mut data)).unwrap();
+                    assert_eq!(std::slice::from_raw_parts(data.cast::<u32>(),2), &[0x12345678,0xabcdef01]);
+                    back.Unmap(0,None);
+                } else {
+                    assert!(messages.is_some_and(|m| m.contains("COPY_DEST") && m.contains("root shader resource")), "the unsplit control must reproduce error 538");
+                }
+            }
+        }
+    }
+
     /// What copies with two sides cost to make (ignored: a measurement for
     /// `VICTORY_CARD_ALL`): buffers of 64 KiB on the card and in the PC's
     /// memory.

@@ -1208,6 +1208,19 @@ pub(crate) fn ask_once_end() {
     }
 }
 
+/// Tests: held while a test stands a submission's asking ([`ask_once`] to
+/// [`ask_once_end`], or [`ask_ahead`] and [`ask_rest`]). The journal holds
+/// one such asking, as the one submitting lane makes them; tests run beside
+/// one another in one process, and another test's asking or its end in the
+/// middle of one replaced or ended it (`no_write_is_lost_with_port_7`: "round
+/// 172, page 7: 93722 is not after 93725", 2 runs in 15 of the whole suite,
+/// none in 48 of that test alone).
+#[cfg(test)]
+pub(crate) fn one_submission() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: Mutex<()> = Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// We wrote title memory `[at, at + len)` while a submission's one asking
 /// stands (the title's buffer copies, done at submission): its pages count
 /// as written after that asking, so the refreshes that follow copy them.
@@ -2094,18 +2107,30 @@ fn placeholder(block: usize) -> bool {
     // (Class 3 answers with the kind of memory in that word, not the flags.)
     const MEMORY_REGION_INFORMATION_EX: u32 = 7;
     const PLACEHOLDER_RESERVATION: u32 = 1 << 8;
+    /// Wine has no answer for the class ("unknown information class",
+    /// `STATUS_INVALID_INFO_CLASS`) and logs a `fixme` line for each asking:
+    /// asked once, the fallback below is taken from then on (#114).
+    static UNANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    const STATUS_INVALID_INFO_CLASS: i32 = 0xC000_0003_u32 as i32;
     let mut region = Region::default();
-    // SAFETY: the answer's room and its size.
-    let status = unsafe {
-        NtQueryVirtualMemory(
-            windows_sys::Win32::System::Threading::GetCurrentProcess(),
-            (block * BLOCK) as *const _,
-            MEMORY_REGION_INFORMATION_EX,
-            (&raw mut region).cast(),
-            size_of::<Region>(),
-            std::ptr::null_mut(),
-        )
+    let status = if UNANSWERED.load(std::sync::atomic::Ordering::Relaxed) {
+        STATUS_INVALID_INFO_CLASS
+    } else {
+        // SAFETY: the answer's room and its size.
+        unsafe {
+            NtQueryVirtualMemory(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                (block * BLOCK) as *const _,
+                MEMORY_REGION_INFORMATION_EX,
+                (&raw mut region).cast(),
+                size_of::<Region>(),
+                std::ptr::null_mut(),
+            )
+        }
     };
+    if status == STATUS_INVALID_INFO_CLASS {
+        UNANSWERED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if status >= 0 {
         return region.region_type & PLACEHOLDER_RESERVATION != 0;
     }
@@ -4401,6 +4426,7 @@ mod tests {
     /// copied.
     #[test]
     fn the_rest_of_the_one_asking_has_a_number_of_its_own() {
+        let _one = one_submission();
         // SAFETY: a fresh write-watched allocation, freed at the end.
         let p = unsafe {
             VirtualAlloc(std::ptr::null(), 4 * PAGE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE)
@@ -5899,6 +5925,7 @@ mod port7_tests {
     /// before asking is told of that write.
     #[test]
     fn no_write_is_lost_with_port_7() {
+        let _one = one_submission();
         askers_and_a_submission(1);
         askers_and_a_submission(2);
     }

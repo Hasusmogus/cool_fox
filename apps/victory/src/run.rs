@@ -36,6 +36,17 @@ fn check_cpu_features() -> Result<()> {
 }
 
 #[cfg(windows)]
+fn configure_controller_artwork(title_dir: &Path, cache_dir: &Path) -> Result<&'static str> {
+    if victory_hle::modules::gameinput::dualsense_prompts()
+        && let Some(paths) = victory_game::dualsense::prepare(title_dir, cache_dir)?
+    {
+        victory_hle::modules::files::set_package_read_views(&paths)?;
+        return Ok("DualSense prompts and layout");
+    }
+    Ok("original package artwork")
+}
+
+#[cfg(windows)]
 pub fn run(
     exe: &Path,
     unimplemented: Unimplemented,
@@ -98,6 +109,14 @@ pub fn run(
     );
     // The console's fixed drives: the package as `G:`, temporary files `T:`.
     victory_hle::modules::files::mount_at('G', title_dir);
+    if execute {
+        match configure_controller_artwork(title_dir, &cfg.cache_dir) {
+            Ok(artwork) => println!("controller UI  {artwork}"),
+            Err(error) => {
+                eprintln!("controller UI: using the package's artwork ({error:#})");
+            }
+        }
+    }
     let temp = cfg.data_subdir(&format!("{:08X}/temp", title.id))?;
     victory_hle::modules::files::mount_at('T', &temp);
     victory_hle::runtime::set_title(victory_hle::runtime::Title { storage, ..title });

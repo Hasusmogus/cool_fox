@@ -4564,7 +4564,8 @@ impl<'a> Lower<'a> {
     /// (0, 32, 64, ...). A GPU need not give a host wave consecutive thread indices (NVIDIA's
     /// 8 x 8 groups), so each wave takes the next 32 from an LDS counter instead: every thread
     /// zeroes it, the group meets, each wave's first lane adds 32 and the wave takes what it
-    /// found. Branch-free, in the entry block, which every thread runs.
+    /// found. A partial host wave owns the group's final threads and does not advance the
+    /// counter. Branch-free, in the entry block, which every thread runs.
     fn wave_base(&mut self) -> Option<V> {
         let slot = self.halves?;
         if let Some(v) = self.wave_base {
@@ -4580,10 +4581,29 @@ impl<'a> Lower<'a> {
         let lane = self.s.op(e, "waveGetLaneIndex", Attr::ReadOnly, i32t, 111, &[]);
         let first = self.s.m.cmp(e, pred::EQ, lane, zero);
         let k32 = self.s.m.i32(32);
+        let group = self.s.threads.expect("compute group").iter().product::<u32>();
+        let partial = if group % 32 != 0 {
+            let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+            let yes = self.s.m.bool(true);
+            let bits = self.s.op(e, "waveActiveBallot", Attr::NoUnwind, four, 116, &[yes]);
+            let lo = self.s.m.extract(e, bits, 0);
+            let count = self.s.op(e, "unaryBits.i32", Attr::ReadNone, i32t, 31, &[lo]);
+            Some(self.s.m.cmp(e, pred::IULT, count, k32))
+        } else {
+            None
+        };
         let add = self.s.m.select(e, first, k32, zero);
+        let add = partial.map_or(add, |small| self.s.m.select(e, small, zero, add));
         let ptr = self.s.m.element(e, lds, k);
         let old = self.s.m.atomic(e, Rmw::Add, ptr, add);
         let base = self.s.op(e, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[old]);
+        // A partial wave owns the tail even when it reaches the allocator
+        // first. Only full waves reserve ranges from the counter; otherwise
+        // a later full wave can extend past the group and leave a hole.
+        let base = partial.map_or(base, |small| {
+            let tail = self.s.m.i32(group / 32 * 32);
+            self.s.m.select(e, small, tail, base)
+        });
         self.s.flags |= flags::WAVE_OPS;
         self.wave_base = Some(base);
         Some(base)
