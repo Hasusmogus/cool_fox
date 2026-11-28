@@ -6235,6 +6235,9 @@ impl Host {
             None => runs,
         };
         let parts: Vec<usize> = parts.iter().map(|&n| n + usize::from(own.is_some())).collect();
+        let parts = place::submission_parts(&parts, runs.iter().map(|list| {
+            list.deferred().copies.iter().any(|step| matches!(step, Step::Placed(_)))
+        }));
         stage.next("submit: the sweep");
         let behind = late && flying();
         // Before this submission counts as started: what the sweep lets go
@@ -6463,6 +6466,7 @@ impl Host {
             return Some((submitted, sent));
         }
         // Diagnostics: each list on its own, timed (`VICTORY_GPU_TIMING`).
+        let cuts: Vec<usize> = parts.iter().filter_map(|&n| firsts.get(n).copied()).collect();
         #[cfg(feature = "diagnostics")]
         let groups: Vec<&[Option<ID3D12CommandList>]> = if timing() {
             firsts
@@ -6471,10 +6475,18 @@ impl Host {
                 .map(|(&a, &b)| &lists[a..b])
                 .collect()
         } else {
-            vec![&lists[..]]
+            std::iter::once(0).chain(cuts.iter().copied())
+                .zip(cuts.iter().copied().chain([lists.len()]))
+                .map(|(a, b)| &lists[a..b]).collect()
         };
         #[cfg(not(feature = "diagnostics"))]
-        let groups = [&lists[..]];
+        let groups: Vec<_> = std::iter::once(0).chain(cuts.iter().copied())
+            .zip(cuts.iter().copied().chain([lists.len()]))
+            .map(|(a, b)| &lists[a..b]).collect();
+        #[cfg(feature = "diagnostics")]
+        let individual = timing();
+        #[cfg(not(feature = "diagnostics"))]
+        let individual = false;
         submitting(2, runs.len());
         for (i, group) in groups.iter().enumerate() {
             *submitted += 1;
@@ -6483,6 +6495,11 @@ impl Host {
             unsafe {
                 self.queue.ExecuteCommandLists(group);
                 self.card_sent();
+                // The call boundary orders the GPU and decays buffers;
+                // no CPU wait is needed between these groups.
+                if !individual && i + 1 < groups.len() {
+                    continue;
+                }
                 let waited = self
                     .queue
                     .Signal(&self.fence, *submitted)
