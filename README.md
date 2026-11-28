@@ -23,19 +23,19 @@ donations buy nothing but time spent on the next fix.
 Measured in the opening prison scenes (Series X profile, 1080p output) on the test machine below.
 Every number is from a scripted run: launch, wait for the scene, measure 150 s.
 
-| | Start of the tuning (run 56) | Runs 85–90 | Now (runs 113–120) |
-|---|---|---|---|
-| Steady gameplay | ~128 ms a frame (7.8 fps) | ~51 ms (~19 fps) | **~43 ms (~23 fps)** |
-| GPU busy | | ~87–92 % | ~68 % |
-| Draws a frame | ~3,700 | ~4,000–4,800 | ~4,800 |
+| | Start of the tuning (run 56) | Runs 85–90 | Runs 113–120 | Now (runs 127–131) |
+|---|---|---|---|---|
+| Steady gameplay | ~128 ms a frame (7.8 fps) | ~51 ms (~19 fps) | ~43 ms (~23 fps) | **~41.8 ms (~24 fps)** |
+| GPU busy | | ~87–92 % | ~68 % | ~70–78 % |
+| Draws a frame | ~3,700 | ~4,000–4,800 | ~4,800 | ~4,800 |
 
 **Working:** boot, menus, cutscenes, gameplay in the first areas, lit interiors, faces with moving
 mouths, NPC heads and clothing, audio.
 
-**Known issues:** some interiors still darker than on console; coloured speckles ("confetti") on one
+**Known issues:** some interiors a little darker than on console (much better since the reflection fix); coloured speckles ("confetti") on one
 NPC's face in some runs; some texture and lighting pop-in after camera cuts; no heat haze (left out
 for speed, see below). The frame is now limited by the thread that prepares and submits GPU work
-(~41 ms of work a frame); the GPU has headroom (~68 % busy). 30 fps needs that thread ~10 ms faster.
+(~38 ms of work a frame); the GPU has headroom. 30 fps needs that thread ~8.5 ms faster.
 
 **Test machine:** Arch Linux, KDE Plasma (Wayland), AMD Ryzen 5 7600X (12 threads), NVIDIA GeForce
 RTX 5070 12 GB, Wine-staging 11.22 with a patched wineserver, vkd3d-proton (master), DXVK's dxgi.
@@ -62,6 +62,9 @@ Measured one at a time against the run before (frame times are steady gameplay u
 | Decal-heap defrag, heat haze and the water's tiled light left out (`VICTORY_LEAVE_OUT`; set it empty to run them) | VIctory-NVIDIA | the defrag alone was 13.7 ms of card time a frame: GPU 92 → 68 % busy, 48 → 45.5 ms |
 | The descriptor-heap thread makes a round after 1 ms without a submission (`VICTORY_HEAP_SYNC_EARLY=1`) | upstream switch, tuned | 44.6 → 43.3 ms |
 | 16-byte SSE2 `memcmp` under Wine (Wine's compares 8 bytes a step) | cool_fox d78b9eb5 | no measurable change here; kept |
+| Release builds with fat LTO and one codegen unit | [TRIDENT](https://github.com/ECHOZwei/TRIDENT)'s release profile | ~45 → 43.4 ms |
+| Three list-translating threads on CPUs of up to 12 threads, six above (`VICTORY_THIN_THREADS`) | TRIDENT's CPU advice | 43.4 → 42.7 ms on a 6-core CPU |
+| Descriptor records without a placed texture skip the heap-wide lock six threads queued on | this fork | 42.7 → 41.8 ms |
 
 ### Picture
 
@@ -75,6 +78,7 @@ Measured one at a time against the run before (frame times are steady gameplay u
 | Reflections that miss take the ambient estimate, not the sky (`VICTORY_AMBIENT_SPECULAR=1`) | VIctory-NVIDIA 2db59d48; the miss program's depth found at its slot in this fork's translation (1, 96) | **glowing blue-white eyes fixed** |
 | A slot keeps showing its old texture until the new one has uploaded (`VICTORY_KEEP_SHOWN=2`) | upstream switch, raised | far less confetti on faces in the diner cutscene |
 | Decal defrag and the water's tiled light left out (above) | VIctory-NVIDIA | no decal smears; no dark blocks on open water (the water is a little darker and bluer instead) |
+| The water light's tile lists take a slot a lane on 32-lane cards (`VICTORY_WATER_TILE_SLOTS=0` turns it off) | [victory-fork](https://github.com/fxceless/victory-fork) cd935520 (idea by xss3009) | the tiles that lost their light to the second host wave are lit: the cause of the dark blocks on open water, fixed in the translator |
 
 ### Stability
 
@@ -89,8 +93,9 @@ Tried and left off by default because they measured neutral or worse here: Kelva
 (`VICTORY_MESH_LAUNCH=1`), renderer ports 6 and 7 (`VICTORY_PORT_GUARD`, `VICTORY_PORT_JOURNAL`),
 `VICTORY_PLACED_ORDER`, `VICTORY_ASK_EARLY`, `VICTORY_PAGE_WRITES=all`, `VICTORY_CARD_RESERVE_BUDGETS`,
 `VICTORY_WIDE_MERGE=1`, write watches asked in pieces (`VICTORY_WATCH_CHUNK_MB`, upstream PR #71),
-more or fewer worker threads (`VICTORY_WIDE_WORKERS=8`, `VICTORY_THIN_THREADS=6`). The code stays, for
-other machines. `VICTORY_ASK_NORESET=1` froze the game here.
+more worker threads (`VICTORY_WIDE_WORKERS=8`, `VICTORY_VIEW_THREADS=8`). The code stays, for other
+machines. `VICTORY_ASK_NORESET=1` froze the game here. Also tried and not kept: mimalloc in place of
+Wine's heap (no change) and retiring descriptor resources in batches (glitches).
 
 ---
 
