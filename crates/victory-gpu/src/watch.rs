@@ -1208,6 +1208,19 @@ pub(crate) fn ask_once_end() {
     }
 }
 
+/// Tests: held while a test stands a submission's asking ([`ask_once`] to
+/// [`ask_once_end`], or [`ask_ahead`] and [`ask_rest`]). The journal holds
+/// one such asking, as the one submitting lane makes them; tests run beside
+/// one another in one process, and another test's asking or its end in the
+/// middle of one replaced or ended it (`no_write_is_lost_with_port_7`: "round
+/// 172, page 7: 93722 is not after 93725", 2 runs in 15 of the whole suite,
+/// none in 48 of that test alone).
+#[cfg(test)]
+pub(crate) fn one_submission() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: Mutex<()> = Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// We wrote title memory `[at, at + len)` while a submission's one asking
 /// stands (the title's buffer copies, done at submission): its pages count
 /// as written after that asking, so the refreshes that follow copy them.
@@ -4401,6 +4414,7 @@ mod tests {
     /// copied.
     #[test]
     fn the_rest_of_the_one_asking_has_a_number_of_its_own() {
+        let _one = one_submission();
         // SAFETY: a fresh write-watched allocation, freed at the end.
         let p = unsafe {
             VirtualAlloc(std::ptr::null(), 4 * PAGE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE)
@@ -5899,6 +5913,7 @@ mod port7_tests {
     /// before asking is told of that write.
     #[test]
     fn no_write_is_lost_with_port_7() {
+        let _one = one_submission();
         askers_and_a_submission(1);
         askers_and_a_submission(2);
     }
