@@ -5467,6 +5467,33 @@ pub(crate) fn small_buffer_in(address: u64, len: u64, most: u64) -> bool {
         .any(|(key, entry)| entry.end > address && entry.end - key.0 <= most)
 }
 
+/// How many MiB of title memory seen by address go on the card's own memory
+/// when `VICTORY_MEMORY_CARD_MB` is unset. 4 GiB, unless the PC has 32 GiB or
+/// less of RAM (`residency::limited_host_ram`) and the card has a budget of
+/// 12 GiB or more: then 8 GiB, so the rest is not paged out of a full RAM
+/// while the card has room (#115: RTX 5070 Ti 16 GB with 32 GB of RAM went
+/// from 30 GB resident and 10 GB of swap to 15 GB, 4-6 fps to 11-12).
+/// Each placement still checks the card's room as it goes.
+fn default_card_mb(limited_host_ram: bool, card_budget: Option<u64>) -> u64 {
+    match card_budget {
+        Some(budget) if limited_host_ram && budget >= 12 << 30 => 8192,
+        _ => 4096,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn the_card_takes_more_title_memory_only_where_ram_is_short_and_the_card_is_big() {
+    const GIB: u64 = 1 << 30;
+    // RTX 5070 Ti 16 GB (about 15 GiB of budget) with 32 GB of RAM: 8 GiB.
+    assert_eq!(default_card_mb(true, Some(15 * GIB)), 8192);
+    assert_eq!(default_card_mb(true, Some(12 * GIB)), 8192);
+    // An 8 or 10 GB card, plenty of RAM, or no budget known: as before.
+    assert_eq!(default_card_mb(true, Some(10 * GIB)), 4096);
+    assert_eq!(default_card_mb(false, Some(23 * GIB)), 4096);
+    assert_eq!(default_card_mb(true, None), 4096);
+}
+
 /// A copy of the memory `[start, start + len)` (an arena of
 /// [`crate::memory`]'s, its directory, title memory around a small buffer)
 /// for the programs that find memory by address, on the card: the structures
@@ -5480,14 +5507,20 @@ pub(crate) fn by_address(start: u64, len: u64) -> Option<Arc<Shadow>> {
     if !cards() || !host.card_ready() {
         return None;
     }
-    // At most so much on the card's own memory (4 GiB unless
+    // At most so much on the card's own memory (`default_card_mb` unless
     // `VICTORY_MEMORY_CARD_MB` says otherwise), and while it has room; past
     // that the side shaders see is in the PC's memory.
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     static USED: AtomicU64 = AtomicU64::new(0);
     let most = *MOST.get_or_init(|| {
         let mb = std::env::var("VICTORY_MEMORY_CARD_MB").ok().and_then(|v| v.trim().parse::<u64>().ok());
-        mb.unwrap_or(4096) << 20
+        let mb = mb.unwrap_or_else(|| {
+            let budget = host.video_memory().map(|[budget, ..]| budget);
+            let mb = default_card_mb(crate::residency::limited_host_ram(), budget);
+            tracing::info!(mb, budget_mb = budget.map(|b| b >> 20), "title memory by address: at most so much on the card");
+            mb
+        });
+        mb << 20
     });
     let room = host.video_memory().is_none_or(|[budget, used, ..]| used + len < budget / 100 * 97);
     let (staging, data) = host.shared_buffer(len)?;
