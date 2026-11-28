@@ -1067,6 +1067,18 @@ impl<'a> Lanes<'a> {
             (Some((b, _)), _) | (_, Some((b, _))) => b,
             _ => return None,
         };
+        // A half that is no phi here comes in unchanged on every edge, so it
+        // must be defined above the join: one written in the block itself
+        // (after its phis) or below it does not exist on those edges, and
+        // its mask would be read before it is made (a compare into s[0:1]
+        // beside an `s_lshr_b32 s8` in a loop header, #111).
+        let above = |v: Value| {
+            let at = self.defs.get(&v).or(self.phis.get(&v)).map(|&(b, _)| b);
+            at.is_none_or(|b| b != block && self.index[b] < self.index[block])
+        };
+        if (lo.is_none() && !above(k.0)) || (hi.is_none() && !above(k.1)) {
+            return None;
+        }
         let target = &p.blocks[block];
         let arg = |phi: Option<(usize, usize)>, own: Value, n: usize| {
             phi.map_or(own, |(_, i)| target.phis[i].args[n])
@@ -1755,6 +1767,49 @@ mod tests {
             s.bools.node(when),
             Some((Atom::Lane(_), Bool::TRUE, Bool::FALSE))
         ));
+    }
+
+    /// A pair read in a loop whose high dword is carried around it (a phi in
+    /// the header) and whose low dword the header itself writes: the low
+    /// dword does not exist on the edges into the header, so no join of the
+    /// pair may name it there (#111: lowering read it before it was made,
+    /// "forward reference outside a phi").
+    #[test]
+    fn a_pair_half_written_in_a_loop_header_is_no_join_there() {
+        let p = build(
+            &[
+                0xBE82_0480, // s_mov_b64 s[2:3], 0
+                0xBE88_0480, // s_mov_b64 s[8:9], 0
+                0x9008_8202, // 8: s_lshr_b32 s8, s2, 2
+                0x4A00_0081, // v_add_nc_u32 v0, 1, v0
+                0x7D84_0080, // v_cmp_eq_u32 vcc, 0, v0
+                0x8882_086A, // s_or_b64 s[2:3], vcc, s[8:9]
+                0xBE89_0303, // s_mov_b32 s9, s3
+                0x8AFE_027E, // s_andn2_b64 exec, exec, s[2:3]
+                0xBF89_FFF9, // s_cbranch_execnz -> 8
+                0x88FE_027E, // s_or_b64 exec, exec, s[2:3]
+                0x7E02_0280, // v_mov_b32 v1, 0
+                S_ENDPGM,
+            ],
+            true,
+        );
+        let header = p
+            .blocks
+            .iter()
+            .position(|b| b.insts.first().is_some_and(|i| i.name() == "s_lshr_b32"))
+            .expect("the loop header");
+        let s8 = Reg::S(8);
+        let written_here = p.blocks[header].insts[0].write(s8).expect("s8");
+        let s = structure(&p).unwrap();
+        for (id, edges) in &s.phi_masks {
+            for &m in edges {
+                for atom in s.bools.support(m) {
+                    if let Atom::Opaque(v) | Atom::Lane(v) | Atom::Uniform(v) = atom {
+                        assert_ne!(v, written_here, "join {id:?} reads the header's s8 on an edge into it");
+                    }
+                }
+            }
+        }
     }
 
     /// `s_cselect` on the SCC a lane loop ended with (the blend-shape skinning
