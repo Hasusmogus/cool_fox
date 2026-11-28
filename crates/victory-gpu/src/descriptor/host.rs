@@ -5539,7 +5539,16 @@ mod tests {
             return; // no host GPU here
         };
         let memory = vec![0u64; 1 << 13];
-        let start = (memory.as_ptr() as u64).next_multiple_of(4096);
+        let mut start = (memory.as_ptr() as u64).next_multiple_of(4096);
+        // Off its elements or not is a matter of the view's offset in the copy
+        // it would be made on: the window around it, not `start`. Where the
+        // memory lands so that `start + 8` is on a 456-byte element of that
+        // window (a page in 57), the structured view is rightly made on the
+        // window (4 MiB wide, "left: 4194304, right: 2048"). A page on it is
+        // not: 4096 is no multiple of 456.
+        if crate::shadow::find(start + 8, 4 * 456).is_some_and(|w| w.offset(start + 8) % 456 == 0) {
+            start += 4096;
+        }
         // SAFETY: a plain CPU-side heap of one view.
         let cpu: ID3D12DescriptorHeap = unsafe {
             host.device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
