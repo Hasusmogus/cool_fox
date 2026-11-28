@@ -119,6 +119,14 @@ VICTORY_LEAVE_OUT=${VICTORY_LEAVE_OUT-731a39171b568298,5dc3b25986622949,6f225b64
 if [[ -n $VICTORY_LEAVE_OUT && -e /proc/driver/nvidia/version ]]; then
     export VICTORY_SKIP_PIPELINES=${VICTORY_SKIP_PIPELINES:+$VICTORY_SKIP_PIPELINES,}$VICTORY_LEAVE_OUT
 fi
+# VICTORY_FAST_CLAMPS=1 (opt-in): indirect records the card reads in title memory are bounded
+# in a batch opened after the last shader that may write buffers, not each alone behind two full
+# waits (VICTORY_PORT_CONSTANTS_ORDER_ALONE=0): about 2,000 drains of the card a frame fewer,
+# prologue 86 -> 76 ms. Known risk: palms and trees came and went in the boat mission's
+# cutscene with it (upstream's runs pop-15).
+if [[ ${VICTORY_FAST_CLAMPS:-0} == 1 && -z ${VICTORY_PORT_CONSTANTS_ORDER_ALONE:-} ]]; then
+    export VICTORY_PORT_CONSTANTS_ORDER_ALONE=0
+fi
 # DXVK's dxgi says an NVIDIA card is AMD unless told not to; the runtime takes AMD's paths then.
 if [[ -z ${DXVK_CONFIG:-} && -e /proc/driver/nvidia/version ]]; then
     export DXVK_CONFIG="dxgi.hideNvidiaGpu = False"
