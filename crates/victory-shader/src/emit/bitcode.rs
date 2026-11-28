@@ -395,6 +395,26 @@ impl Module {
         self.blocks.len() - 1
     }
 
+    /// Moves what block `b` holds so far (its phis and instructions) to a new block, which
+    /// the branches to `b` now reach, and returns it: `b` stays the block code goes on in,
+    /// with its terminator if it has one (the edges out of it are unchanged), so a loop can
+    /// be put between the two while every handle to `b` still names the place where code
+    /// continues.
+    pub fn split_front(&mut self, b: usize) -> usize {
+        let front = self.new_block();
+        self.blocks[front].phis = std::mem::take(&mut self.blocks[b].phis);
+        self.blocks[front].body = std::mem::take(&mut self.blocks[b].body);
+        let to = |t: usize| if t == b { front } else { t };
+        for blk in &mut self.blocks {
+            blk.term = match blk.term {
+                Some(Term::Br(t)) => Some(Term::Br(to(t))),
+                Some(Term::CondBr(c, t, f)) => Some(Term::CondBr(c, to(t), to(f))),
+                t => t,
+            };
+        }
+        front
+    }
+
     pub fn type_of(&self, v: V) -> Ty {
         match v {
             V::Global(i) => self.globals[i as usize].ptr,

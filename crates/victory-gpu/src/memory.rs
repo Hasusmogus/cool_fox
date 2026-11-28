@@ -104,8 +104,15 @@ const BACK: u64 = 256 << 10;
 /// Pages taken from the faults, of one frame and in all, at most: a ray in a
 /// structure that is not right goes anywhere, and 2,048 a frame took all the
 /// pages there are in the first seconds (run light-4).
+///
+/// In all: 16,384 (1 GiB of 64 KiB pages; 2,048 before). The run's 2,048 were
+/// used up minutes into the world (run 78: "faults in all 2048", 56 pages a
+/// frame turned down from then on), and every page the ray programs touched
+/// after that read zeros for the rest of the run: dark, speckled indirect
+/// light. The VIctory fork measured 8,192 used up in one to three minutes and
+/// made it a recycled budget (3e573d2); until that is ported, a larger limit.
 const FAULTS: usize = 128;
-const FAULTS_ALL: usize = 2048;
+const FAULTS_ALL: usize = 16384;
 /// Frames over which every page is looked at once.
 const SWEEP: usize = 128;
 
@@ -219,15 +226,42 @@ pub(crate) struct Ready {
     pub(crate) base: u32,
 }
 
+/// Gives back memory [`crate::upload::reserve`] took and nothing holds.
+fn release(at: usize) {
+    use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
+    // SAFETY: a whole reservation of ours that nothing refers to.
+    unsafe { VirtualFree(at as *mut _, 0, MEM_RELEASE) };
+}
+
 impl Memory {
     fn new() -> Option<Memory> {
-        let host = host()?;
+        // (each step that fails says so once: the draws that need it are dropped)
+        let failed = |step: &str| tracing::warn!(step, "title memory by address: not set up");
+        let Some(host) = host() else {
+            failed("no host device");
+            return None;
+        };
         let bytes = u64::from(MEMORY_PAGES) * 8;
         // Zeroed, and watched for writes as the title's memory is.
-        let entries = crate::upload::reserve(bytes as usize)?;
-        let directory = crate::shadow::by_address(entries as u64, bytes)?;
+        let Some(entries) = crate::upload::reserve(bytes as usize) else {
+            failed("the directory's upload memory was refused");
+            return None;
+        };
+        let Some(directory) = crate::shadow::by_address(entries as u64, bytes) else {
+            failed("the directory's card copy was refused");
+            // Given back: a set-up asked for again later must not take another 16 MiB of
+            // the [4 GiB, 2^37) window each time (under Wine this filled the window in
+            // minutes, and then the title's own allocations there failed).
+            release(entries);
+            return None;
+        };
         crate::host::name(&directory.buffer, || "title memory by address: directory".into());
-        let (faults, data) = host.shared_buffer(u64::from(MEMORY_FAULTS) * 4)?;
+        let Some((faults, data)) = host.shared_buffer(u64::from(MEMORY_FAULTS) * 4) else {
+            failed("the fault notes' shared buffer was refused");
+            // (the directory's card copy goes with `directory`; its upload memory stays
+            // registered with that copy, so it is kept rather than given back)
+            return None;
+        };
         crate::host::name(&faults, || "title memory by address: faults".into());
         // SAFETY: a fresh mapping of at least that many bytes.
         unsafe { std::ptr::write_bytes(data, 0, MEMORY_FAULTS as usize * 4) };
@@ -389,11 +423,46 @@ impl Memory {
     }
 
     /// Another arena's pages.
+    ///
+    /// After one that could not be made, no other is tried before
+    /// the next frame. `ready` asks for one at every dispatch of the builder
+    /// while the spares are low (thousands a frame); once the reservation
+    /// failed every ask searched the address range again under this lock,
+    /// and frames took 30 s until the title's watchdog ended the run (RTX
+    /// 4090, 11-27: 19 arenas for minutes, the recording threads 70 % in
+    /// the kernel under `upload::reserve`). A reservation whose copy could
+    /// not be made is given back, not left behind.
     fn another(&mut self) -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        static FAILED: AtomicU64 = AtomicU64::new(u64::MAX);
+        static WHY: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        let frame = crate::frame::current();
+        if FAILED.load(Relaxed) == frame {
+            return false;
+        }
+        let arenas = self.arenas.len();
+        let failed = |why: usize| {
+            FAILED.store(frame, Relaxed);
+            let n = WHY[why].fetch_add(1, Relaxed) + 1;
+            if n.is_power_of_two() {
+                tracing::warn!(
+                    arenas,
+                    times = n,
+                    "title memory by address: no other arena ({}); none tried again this frame",
+                    ["the address range has no room for one", "its copy could not be made"][why]
+                );
+            }
+        };
         let Some(at) = crate::upload::reserve(ARENA as usize) else {
+            failed(0);
             return false;
         };
         let Some(n) = crate::shadow::by_address(at as u64, ARENA).and_then(|s| self.number(s)) else {
+            failed(1);
+            // SAFETY: the reservation just made, which nothing else knows of.
+            unsafe {
+                windows_sys::Win32::System::Memory::VirtualFree(at as *mut _, 0, windows_sys::Win32::System::Memory::MEM_RELEASE)
+            };
             return false;
         };
         self.arenas.push((n, at));
@@ -905,7 +974,18 @@ pub(crate) fn ready(
 ) -> Option<Ready> {
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
+        // After a set-up that failed, the next try waits `RETRY_FRAMES` frames rather
+        // than coming with the next draw: what refused it (no card copies, a full
+        // window) rarely changes from one draw to the next.
+        static FAILED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+        const RETRY_FRAMES: u64 = 300;
+        let now = crate::frame::current();
+        let failed = FAILED_AT.load(std::sync::atomic::Ordering::Relaxed);
+        if failed != u64::MAX && now < failed + RETRY_FRAMES {
+            return None;
+        }
         *guard = Memory::new();
+        FAILED_AT.store(if guard.is_none() { now } else { u64::MAX }, std::sync::atomic::Ordering::Relaxed);
     }
     let m = guard.as_mut()?;
     let frame = crate::frame::current();

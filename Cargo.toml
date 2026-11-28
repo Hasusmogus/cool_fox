@@ -87,9 +87,10 @@ opt-level = 2
 
 [profile.release]
 debug = "line-tables-only"
-# One codegen unit and thin LTO: the port spends its time hashing, copying and
-# translating, so cross-crate inlining pays for the slower build.
-lto = "thin"
+# One unit, optimised whole across crates (TRIDENT's release profile): ~1.6 ms
+# less a frame on the submitting thread (run 126: 43.4 against ~45 ms), at
+# about a minute more of build time.
+lto = "fat"
 codegen-units = 1
 
 # The development build: release code generation plus the `diagnostics`
