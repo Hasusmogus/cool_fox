@@ -617,7 +617,12 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
         l.SetComputeRoot32BitConstants(0, 13, words.as_ptr().cast(), 0);
-        l.SetComputeRootDescriptorTable(1, views.depth);
+        // Only the resolve reads depth. The radiance and air roles have
+        // only an image UAV, which is not a valid descriptor for this SRV
+        // range even when their shaders leave the range unused.
+        if role == Role::Resolve {
+            l.SetComputeRootDescriptorTable(1, views.depth);
+        }
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
         l.SetComputeRootUnorderedAccessView(4, pass.points.GetGPUVirtualAddress());
@@ -769,5 +774,123 @@ mod tests {
         make(&host.device, |bytes| host.uav_buffer(bytes)).expect("the passes");
         // (Made only with its switch on, so compiled here by itself.)
         crate::host::compile(&format!("#define MARCH\n{SOURCE}"), s!("clear_march"), s!("cs_5_1")).expect("the march clamp");
+    }
+
+    /// Run explicitly with diagnostics, VICTORY_D3D12_DEBUG=1,
+    /// VICTORY_AMBIENT=1 and VICTORY_AMBIENT_AIR=1.5, without the game.
+    #[test]
+    #[ignore = "requires a real GPU, the debug layer and explicit ambient settings"]
+    fn radiance_and_air_do_not_bind_uavs_as_depth() {
+        use windows::Win32::Graphics::Dxgi::Common::*;
+        use windows::core::Interface;
+
+        assert_eq!(set(), Set::Estimate(1.0));
+        assert_eq!(air(), 1.5);
+        let host = host().expect("real D3D12 device required");
+        let queue: ID3D12InfoQueue = host.device.cast().expect("enable the D3D12 debug layer");
+        let pass = pass().unwrap();
+        let list = host.new_list().unwrap();
+        let (zero, data) = host.upload_buffer(CELL_BYTES + POINT_BYTES).unwrap();
+        // SAFETY: the upload mapping covers both complete buffers.
+        unsafe {
+            std::ptr::write_bytes(data, 0, (CELL_BYTES + POINT_BYTES) as usize);
+            for (buffer, offset, size) in [(&pass.cells, 0, CELL_BYTES), (&pass.points, CELL_BYTES, POINT_BYTES)] {
+                list.list.ResourceBarrier(&[crate::host::transition(buffer,
+                    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST)]);
+                list.list.CopyBufferRegion(buffer, 0, &zero, offset, size);
+                list.list.ResourceBarrier(&[crate::host::transition(buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)]);
+            }
+        }
+        let mean_back = host.read_back_buffer(16).unwrap();
+        let image_back = host.read_back_buffer(4 * 256).unwrap();
+        let mut kept = Vec::new();
+        for (role, dimension, value) in [
+            (Role::Radiance, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 1.0),
+            (Role::Air, D3D12_RESOURCE_DIMENSION_TEXTURE3D, 4.0),
+        ] {
+            let desc = D3D12_RESOURCE_DESC {
+                Dimension: dimension, Width: 4, Height: 4, DepthOrArraySize: 1, MipLevels: 1,
+                Format: DXGI_FORMAT_R11G11B10_FLOAT, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, ..Default::default()
+            };
+            let mut texture: Option<ID3D12Resource> = None;
+            // SAFETY: sized descriptors and live outputs; one immutable UAV per image.
+            let (texture, gpu_heap, cpu_heap) = unsafe {
+                host.device.CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+                    D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, None, &mut texture).unwrap();
+                let texture = texture.unwrap();
+                let heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, NumDescriptors: 1, ..Default::default()
+                };
+                let cpu_heap: ID3D12DescriptorHeap = host.device.CreateDescriptorHeap(&heap_desc).unwrap();
+                let gpu_heap: ID3D12DescriptorHeap = host.device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, ..heap_desc
+                }).unwrap();
+                for heap in [&cpu_heap, &gpu_heap] {
+                    host.device.CreateUnorderedAccessView(&texture, None::<&ID3D12Resource>, None, heap.GetCPUDescriptorHandleForHeapStart());
+                }
+                list.list.SetDescriptorHeaps(&[Some(gpu_heap.clone())]);
+                list.list.ClearUnorderedAccessViewFloat(gpu_heap.GetGPUDescriptorHandleForHeapStart(),
+                    cpu_heap.GetCPUDescriptorHandleForHeapStart(), &texture, &[value; 4], &[]);
+                (texture, gpu_heap, cpu_heap)
+            };
+            // The title passes only its image UAV for these roles. That
+            // handle must never be bound to the unused depth SRV parameter.
+            let image = unsafe { gpu_heap.GetGPUDescriptorHandleForHeapStart() };
+            assert!(after(&list, role, &Views { image, depth: image, size: [4, 4], slices: 1 }));
+            assert_eq!(host.log_messages(), None, "ambient recording must have no debug-layer errors");
+            if role == Role::Air {
+                // SAFETY: all writes precede these copies; aligned footprints cover the images.
+                unsafe {
+                    list.list.ResourceBarrier(&[
+                        crate::host::transition(&pass.cells, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                        crate::host::transition(&texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                    ]);
+                    list.list.CopyBufferRegion(&mean_back, 0, &pass.cells, CELLS * 16, 16);
+                    let dst = D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(&image_back), Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                            Offset: 0, Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                                Format: desc.Format, Width: 4, Height: 4, Depth: 1, RowPitch: 256,
+                            },
+                        } },
+                    };
+                    let src = D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(&texture), Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                    };
+                    list.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+                    list.list.ResourceBarrier(&[crate::host::transition(&pass.cells,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)]);
+                }
+            }
+            kept.push((texture, gpu_heap, cpu_heap));
+        }
+        list.close();
+        assert_eq!(host.log_messages(), None);
+        host.execute_sync_internal(&list);
+        // Submission logs and clears its queue, so inspect new messages and
+        // also check the computed values, rather than trusting a clean log alone.
+        assert_eq!(host.log_messages(), None);
+        // SAFETY: completed readbacks, within their mappings.
+        unsafe {
+            let mut data = std::ptr::null_mut();
+            mean_back.Map(0, None, Some(&mut data)).unwrap();
+            assert_eq!(std::slice::from_raw_parts(data.cast::<f32>(), 4), &[1.0; 4]);
+            mean_back.Unmap(0, None);
+            image_back.Map(0, None, Some(&mut data)).unwrap();
+            let words = std::slice::from_raw_parts(data.cast::<u32>(), 256);
+            for y in 0..4 {
+                for x in 0..4 {
+                    // R11G11B10_FLOAT encoding of (1.5, 1.5, 1.5).
+                    assert_eq!(words[y * 64 + x], 0x7c1f_03e0);
+                }
+            }
+            image_back.Unmap(0, None);
+            assert!(host.device.GetDeviceRemovedReason().is_ok());
+            queue.ClearStoredMessages();
+        }
     }
 }
