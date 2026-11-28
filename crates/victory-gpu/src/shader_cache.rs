@@ -78,6 +78,7 @@ fn build() -> [u8; 32] {
             "VICTORY_PAIR_MEET",
             "VICTORY_PAIR_SLOTS",
             "VICTORY_THREAD_TICKET",
+            "VICTORY_WATER_TILE_SLOTS",
         ] {
             bytes.extend_from_slice(name.as_bytes());
             bytes.push(b'=');
