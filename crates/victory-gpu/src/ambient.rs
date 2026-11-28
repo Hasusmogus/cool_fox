@@ -1073,7 +1073,7 @@ mod tests {
             // The title passes only its image UAV for these roles. That
             // handle must never be bound to the unused depth SRV parameter.
             let image = unsafe { gpu_heap.GetGPUDescriptorHandleForHeapStart() };
-            assert!(after(&list, role, &Views { image, depth: image, size: [4, 4], slices: 1 }));
+            assert!(after(&list, role, &Views { image, depth: image, size: [4, 4], slices: 1, depth_size: [4, 4] }));
             assert_eq!(host.log_messages(), None, "ambient recording must have no debug-layer errors");
             if role == Role::Air {
                 // SAFETY: all writes precede these copies; aligned footprints cover the images.
