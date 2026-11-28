@@ -303,7 +303,7 @@ fn note_bake_sources(frame: u64, n: [u64; BAKE_SOURCE_COUNTS]) {
             host_written_published = n[5],
             not_mapped = n[6],
             failed = n[8],
-            "a decoration bake's sources were not what title memory holds: brought up to date before the bake (VICTORY_BAKE_SOURCES=0: not)"
+            "a decoration bake's sources were not what title memory holds: brought up to date before the bake (VICTORY_BAKE_SOURCES=1)"
         );
     }
     if all[0].is_power_of_two() {
@@ -2536,8 +2536,8 @@ impl State {
     /// holds now (`crate::texture::unchanged`), is uploaded on `list` (the
     /// bake's own, run before the bake) whatever the card's room and the
     /// pass's budget, and published with the others in `sync`. Returns
-    /// the counts for the line ([`BAKE_SOURCES`]). `VICTORY_BAKE_SOURCES=0`:
-    /// not done (only the pass, as before).
+    /// the counts for the line ([`BAKE_SOURCES`]). Only with
+    /// `VICTORY_BAKE_SOURCES=1` (off by default: only the pass, as before).
     fn bring_bake_sources(
         &self,
         list: &HostList,
@@ -2547,7 +2547,10 @@ impl State {
         sync: &mut BakeSync,
     ) -> Option<[u64; BAKE_SOURCE_COUNTS]> {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if !*ON.get_or_init(|| std::env::var_os("VICTORY_BAKE_SOURCES").is_none_or(|v| v != "0")) {
+        // Opt-in (`VICTORY_BAKE_SOURCES=1`): it found and re-uploaded 1-3
+        // stale sources a bake, but the diner face confetti stayed (runs
+        // 154/155 on: both; 156/157 off: one of two).
+        if !*ON.get_or_init(|| std::env::var_os("VICTORY_BAKE_SOURCES").is_some_and(|v| v == "1")) {
             return None;
         }
         let mut n = [0u64; BAKE_SOURCE_COUNTS];
