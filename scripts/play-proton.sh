@@ -76,6 +76,11 @@ for setting in \
     [[ -n ${!name:-} ]] || export "$setting"
 done
 [[ -n ${VICTORY_LOG:-} || -n ${RUST_LOG:-} ]] || export VICTORY_LOG=warn
+# Wine writes a `fixme` line for every call it does not implement, and the
+# layer makes some in hot paths: one session logged 33,198 (#116). Proton
+# defaults to this already; plain wine (VICTORY_WINE=1) does not.
+: "${WINEDEBUG:=-all}"
+export WINEDEBUG
 # On an NVIDIA card the title's own upscaler (VICTORY_UPSCALER=6), not
 # FidelityFX's (7, the title's choice on Series S): FidelityFX's is a network
 # of 8-bit dot products, and its eight largest layers took 120 of the 200 ms

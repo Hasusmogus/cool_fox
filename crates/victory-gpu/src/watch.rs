@@ -2107,18 +2107,30 @@ fn placeholder(block: usize) -> bool {
     // (Class 3 answers with the kind of memory in that word, not the flags.)
     const MEMORY_REGION_INFORMATION_EX: u32 = 7;
     const PLACEHOLDER_RESERVATION: u32 = 1 << 8;
+    /// Wine has no answer for the class ("unknown information class",
+    /// `STATUS_INVALID_INFO_CLASS`) and logs a `fixme` line for each asking:
+    /// asked once, the fallback below is taken from then on (#114).
+    static UNANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    const STATUS_INVALID_INFO_CLASS: i32 = 0xC000_0003_u32 as i32;
     let mut region = Region::default();
-    // SAFETY: the answer's room and its size.
-    let status = unsafe {
-        NtQueryVirtualMemory(
-            windows_sys::Win32::System::Threading::GetCurrentProcess(),
-            (block * BLOCK) as *const _,
-            MEMORY_REGION_INFORMATION_EX,
-            (&raw mut region).cast(),
-            size_of::<Region>(),
-            std::ptr::null_mut(),
-        )
+    let status = if UNANSWERED.load(std::sync::atomic::Ordering::Relaxed) {
+        STATUS_INVALID_INFO_CLASS
+    } else {
+        // SAFETY: the answer's room and its size.
+        unsafe {
+            NtQueryVirtualMemory(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                (block * BLOCK) as *const _,
+                MEMORY_REGION_INFORMATION_EX,
+                (&raw mut region).cast(),
+                size_of::<Region>(),
+                std::ptr::null_mut(),
+            )
+        }
     };
+    if status == STATUS_INVALID_INFO_CLASS {
+        UNANSWERED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if status >= 0 {
         return region.region_type & PLACEHOLDER_RESERVATION != 0;
     }
