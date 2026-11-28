@@ -2078,6 +2078,14 @@ impl ValueWait {
         met
     }
 
+    /// Without a host to read the title's memory through, nothing is
+    /// waited for.
+    #[cfg(not(windows))]
+    fn holds(&self) -> bool {
+        true
+    }
+
+    #[cfg(windows)]
     fn holds(&self) -> bool {
         let bytes = if self.wide { 8 } else { 4 };
         if self.address == 0 {
