@@ -244,6 +244,30 @@ pub fn picker_code(kind: u32) -> Vec<u8> {
     c
 }
 
+/// +0x23cf620, the handler +0x23cf6f7 installs around the wait that follows
+/// it (`lea rcx, [+0x23cf620] ; call +0x22161f0`, the old handler put back
+/// behind the wait; it is the only reference to it): it decodes and logs the
+/// title's error tag ("Unsignaled CrossQueueBarrier" in the crash log), then
+/// faults on purpose with a store to address 0. On this layer the wait can
+/// pass the title's limit when a frame is slow (runs 62 and 64: THIN off,
+/// renderer ports off), and the title ended. With the store gone the handler
+/// logs and returns, and the wait goes on (`VICTORY_TITLE_WATCHDOG=1`: the
+/// title's store kept).
+pub const WATCHDOG: Site = Site {
+    at: 0x23cf683,
+    what: "the title's hang handler's store to address 0",
+    bytes: &[0xc7, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x21, 0xd4, 0x8b, 0x4d], // mov dword [0], 4D8BD421h
+};
+
+/// What goes at [`WATCHDOG`]: eleven bytes of no-op (a 9-byte and a 2-byte `nop`).
+pub const WATCHDOG_CODE: [u8; 11] = [0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x66, 0x90];
+
+/// Whether the title's hang handler keeps its store to address 0
+/// (`VICTORY_TITLE_WATCHDOG=1`; by default it is taken out).
+pub fn title_watchdog_kept() -> bool {
+    std::env::var_os("VICTORY_TITLE_WATCHDOG").is_some_and(|v| v == "1")
+}
+
 /// Compares `site`'s bytes in the image of `size` bytes at `base`.
 ///
 /// # Safety
@@ -312,6 +336,9 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
     }
     if let Some(kind) = asked_upscaler() {
         asked.push((&PICKER, picker_code(kind), format!("returns {kind}")));
+    }
+    if !title_watchdog_kept() {
+        asked.push((&WATCHDOG, WATCHDOG_CODE.to_vec(), "logs and returns".to_owned()));
     }
     for (site, code, value) in asked {
         // SAFETY: the caller's promise.

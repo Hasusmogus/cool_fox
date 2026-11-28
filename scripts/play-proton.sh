@@ -63,15 +63,27 @@ export VICTORY_LOG_FILE
 # VICTORY_WC_NO_BACK=1 with VICTORY_WC_NO_BACK_MIN_KB=1024 (as VIctory-NVIDIA's launcher): what
 # shaders write into big write-combined title memory, which the title's CPU does not read,
 # stays on the card (RTX 5060 prologue: copying back 27 -> 11 ms a frame, preparing 79 -> 67).
+# From dfmbrollins/victory-linux-nvidia's linux/play.sh (measured there on an RTX 5070): list
+# calls written down and translated by threads of their own (VICTORY_THIN=1, 3 threads on CPUs of
+# up to 12 threads, 6 above), textures guarded instead of hashed whole (TEXTURE_GUARD=1), the
+# heaps' records synced early, shown slots kept (KEEP_SHOWN=2: face confetti), ray walks that end
+# at the root with the builder off (BVH_MISS=1) and a stand-in for reflections without rays
+# (AMBIENT_SPECULAR=1). RTX 5060 prologue: 98.6 -> 84.4 ms a frame, and the cell, a room of
+# silhouettes before, lit. Not their VICTORY_CARD_BUFFERS_MB=1536 / CARD_WINDOWS_MB=1024: set for
+# 12 GB, on an 8 GB card the driver failed to map GPU memory and the PC froze.
 for setting in \
     VICTORY_AMBIENT_AIR=1.5 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_RELAY=2 VICTORY_WIDE_BACK=1 \
     VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1 VICTORY_RELAY_COPY=1 \
     VICTORY_CARD_STEPS=2 VICTORY_INDIRECT_BATCH=2 VICTORY_MAP_THREADS=1 VICTORY_CARD_AWAKE=1 \
-    VICTORY_SHOW_AFTER=1 VICTORY_AMBIENT=1 VICTORY_THIN=0 VICTORY_JOIN_PARTS=0 \
-    VICTORY_TEXTURE_GUARD=0 VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_CBV=1 \
+    VICTORY_SHOW_AFTER=1 VICTORY_AMBIENT=1 VICTORY_THIN=1 VICTORY_JOIN_PARTS=0 \
+    VICTORY_TEXTURE_GUARD=1 VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_CBV=1 \
     VICTORY_UPLOAD_AHEAD=1 VICTORY_LEVELS_ON_DEMAND=1 VICTORY_CARD_BUFFERS_MIN_KB=64 \
     VICTORY_COMMITTED_QUERY=1 VICTORY_HAIR=1 VICTORY_GUARD_REST=50000 VICTORY_POKE=71b6330:1 \
-    VICTORY_WC_NO_BACK=1 VICTORY_WC_NO_BACK_MIN_KB=1024; do
+    VICTORY_WC_NO_BACK=1 VICTORY_WC_NO_BACK_MIN_KB=1024 \
+    VICTORY_HEAP_SYNC_EARLY=1 VICTORY_KEEP_SHOWN=2 VICTORY_FILL_TITLE=1 VICTORY_WIDE_WORKERS=6 \
+    VICTORY_PIPELINE_BOOK=1 VICTORY_BVH_MISS=1 VICTORY_BVH_BUILDER=0 VICTORY_AMBIENT_SPECULAR=1 \
+    VICTORY_RAYS=1 VICTORY_WATCH_CHUNK_MB=0 \
+    VICTORY_THIN_THREADS=$(( $(nproc) <= 12 ? 3 : 6 )); do
     name=${setting%%=*}
     [[ -n ${!name:-} ]] || export "$setting"
 done
@@ -91,12 +103,25 @@ if [[ -z ${VICTORY_UPSCALER:-} && -e /proc/driver/nvidia/version ]]; then
 fi
 # On a host of 32-lane waves (NVIDIA) the decal heap's CS_DefragHeap_ComputeRelocations
 # (02384a60fda6f2d0) runs only in a form whose two host waves meet by spinning: 18.6 ms of an
-# RTX 5060's frame, the costliest command (VICTORY_GPU_TIMING). VICTORY_SKIP_DEFRAG=1 leaves it
-# out, as VIctory-NVIDIA's launcher does: prologue 102 -> 91 ms a frame, waits for the card
-# 22.7 -> 5.2 ms. Not by default: without it decals the heap moves come out black (beer
-# bottles' labels in the boat mission, #94).
-if [[ ${VICTORY_SKIP_DEFRAG:-0} == 1 && -z ${VICTORY_SKIP_PIPELINES:-} ]]; then
+# RTX 5060's frame, the costliest command (VICTORY_GPU_TIMING), and with it running the prologue's
+# cell stayed a room of silhouettes where it is lit without it (same build and settings, 101.7 ->
+# 85.8 ms a frame). Left out on NVIDIA by default, as VIctory-NVIDIA and victory-linux-nvidia do;
+# the cost: decals the heap moves come out black (beer bottles' labels, #94).
+# VICTORY_SKIP_DEFRAG=0 runs it.
+if [[ ${VICTORY_SKIP_DEFRAG:-$([[ -e /proc/driver/nvidia/version ]] && echo 1 || echo 0)} == 1 \
+    && -z ${VICTORY_SKIP_PIPELINES:-} ]]; then
     export VICTORY_SKIP_PIPELINES=02384a60fda6f2d0
+fi
+# As victory-linux-nvidia leaves out (VICTORY_LEAVE_OUT there; set it empty to run them): the heat
+# haze's in-scatter (731a39171b568298) and the water's tiled light (5dc3b25986622949,
+# 6f225b641c5b0708), which on 32-lane cards leaves dark blocks on the water and costs the card.
+VICTORY_LEAVE_OUT=${VICTORY_LEAVE_OUT-731a39171b568298,5dc3b25986622949,6f225b641c5b0708}
+if [[ -n $VICTORY_LEAVE_OUT && -e /proc/driver/nvidia/version ]]; then
+    export VICTORY_SKIP_PIPELINES=${VICTORY_SKIP_PIPELINES:+$VICTORY_SKIP_PIPELINES,}$VICTORY_LEAVE_OUT
+fi
+# DXVK's dxgi says an NVIDIA card is AMD unless told not to; the runtime takes AMD's paths then.
+if [[ -z ${DXVK_CONFIG:-} && -e /proc/driver/nvidia/version ]]; then
+    export DXVK_CONFIG="dxgi.hideNvidiaGpu = False"
 fi
 
 # VICTORY_CONSOLE: series-x or series-s (series-s fits an 8 GB card: docs/profiling.md).

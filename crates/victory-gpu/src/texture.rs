@@ -1385,6 +1385,18 @@ impl Staging {
         }
         // A change the guard did not see: hashed at every check for a while.
         let found_blind = |last: &mut Last| {
+            // Which textures the guard misses, and how often (diagnostics).
+            #[cfg(feature = "diagnostics")]
+            if blind {
+                static SEEN: std::sync::Mutex<Option<std::collections::HashMap<usize, u32>>> = std::sync::Mutex::new(None);
+                let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+                let n = seen.get_or_insert_with(Default::default).entry(start).or_insert(0);
+                *n += 1;
+                if n.is_power_of_two() {
+                    tracing::info!(start = format_args!("{start:#x}"), size, times = *n, frame = crate::frame::current(),
+                        "a texture changed although the guard saw no write");
+                }
+            }
             if blind && hot_textures() {
                 last.hot_until = crate::frame::current() + HOT_FRAMES;
                 #[cfg(feature = "diagnostics")]

@@ -620,16 +620,16 @@ impl Drop for Asking {
 }
 
 /// Pages of write-watched memory asked about in one call, if asked in
-/// pieces: `VICTORY_WATCH_CHUNK_MB` (8 by default under Wine, whose answer
-/// holds its lock for all of memory; 0, and on Windows by default: one call
-/// for the whole range, as before).
+/// pieces: `VICTORY_WATCH_CHUNK_MB` (0 by default: one call for the whole
+/// range, as before; ~1 ms a frame faster than 8 under Wine, run 114). From
+/// upstream (Hasusmogus, PR #71).
 fn watch_chunk() -> Option<usize> {
     static CHUNK: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *CHUNK.get_or_init(|| {
         let mb = std::env::var("VICTORY_WATCH_CHUNK_MB")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(if crate::host::under_wine() { 8 } else { 0 });
+            .unwrap_or(0);
         (mb > 0).then_some((mb << 20) / PAGE)
     })
 }
@@ -748,6 +748,20 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
             tally(10, u64::from(failed));
             tally(11, started.elapsed().as_nanos() as u64);
         }
+        #[cfg(feature = "diagnostics")]
+        if failed {
+            ask_log(last - first, usize::MAX, started.elapsed().as_nanos() as u64);
+        }
+        if failed && filled > 0 && !keep {
+            // Asked in pieces: the pieces before the one refused reset what
+            // they found. Those writes are in the journal, or no asking would
+            // see them again (the caller asks again by halves, or the guards).
+            let now = next_asking();
+            let mut j = journal_mut();
+            for &at in &found[..filled] {
+                j.notes.note(at / PAGE, 1u16 << (at % PAGE / KERNEL_PAGE), now);
+            }
+        }
         if failed {
             // (On the timeline: how many askings the kernel refuses.)
             crate::timeline::span("asking refused").end();
@@ -756,6 +770,8 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
         if keep {
             reset_found(&found[..count]);
         }
+        #[cfg(feature = "diagnostics")]
+        ask_log(last - first, count, started.elapsed().as_nanos() as u64);
         #[cfg(feature = "diagnostics")]
         {
             tally(12, count as u64);
@@ -776,6 +792,88 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
         }
         Some(pages)
     })
+}
+
+/// Page ranges `(first, last)` the kernel refused to ask about in
+/// [`writes`] (`VICTORY_REFUSED_CACHE=1`; off by default: asked every time).
+static REFUSED: RwLock<Option<std::collections::HashSet<(usize, usize)>>> = RwLock::new(None);
+
+fn refused_cache() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Off by default: neutral (runs 138/139), and fewer changes to suspect
+    // for the picture.
+    *ON.get_or_init(|| std::env::var_os("VICTORY_REFUSED_CACHE").is_some_and(|v| v == "1"))
+}
+
+fn refused_before(first: usize, last: usize) -> bool {
+    refused_cache() && REFUSED.read().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|r| r.contains(&(first, last)))
+}
+
+fn note_refused(first: usize, last: usize) {
+    if !refused_cache() {
+        return;
+    }
+    let mut r = REFUSED.write().unwrap_or_else(|e| e.into_inner());
+    let r = r.get_or_insert_with(Default::default);
+    // Bounded: memory mapped and unmapped for long would grow it.
+    if r.len() >= 1 << 16 {
+        r.clear();
+    }
+    r.insert((first, last));
+}
+
+fn forget_refused(first: usize, last: usize) {
+    if let Some(r) = REFUSED.write().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        r.remove(&(first, last));
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    /// Which path asks the kernel now (diagnostics: the asking log).
+    static SITE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("?") };
+}
+
+#[inline]
+fn site(_name: &'static str) {
+    #[cfg(feature = "diagnostics")]
+    SITE.with(|s| s.set(_name));
+}
+
+/// One line per kernel asking (`VICTORY_ASK_LOG=<file>`, diagnostics): the
+/// thread, the pages of 64 KiB asked, the 4 KiB pages found written, the
+/// nanoseconds; 10
+/// seconds of them from `VICTORY_ASK_LOG_AFTER` seconds after the first
+/// asking (120).
+#[cfg(feature = "diagnostics")]
+fn ask_log(pages: usize, found: usize, ns: u64) {
+    use std::io::Write;
+    static LOG: std::sync::OnceLock<Option<(String, std::time::Instant)>> = std::sync::OnceLock::new();
+    static LINES: Mutex<(Vec<String>, bool)> = Mutex::new((Vec::new(), false));
+    static AFTER: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    let Some((path, began)) = LOG.get_or_init(|| std::env::var("VICTORY_ASK_LOG").ok().map(|p| (p, std::time::Instant::now()))) else {
+        return;
+    };
+    let after = *AFTER.get_or_init(|| std::env::var("VICTORY_ASK_LOG_AFTER").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0));
+    let at = began.elapsed().as_secs_f64();
+    if at < after {
+        return;
+    }
+    let mut held = LINES.lock().unwrap_or_else(|e| e.into_inner());
+    let (lines, done) = &mut *held;
+    if *done {
+        return;
+    }
+    let name = std::thread::current().name().unwrap_or("?").to_string();
+    let found = if found == usize::MAX { -1 } else { found as i64 };
+    let site = SITE.with(|s| s.replace("?"));
+    lines.push(format!("{at:.6} {name} {pages} {found} {ns} {site}"));
+    if at >= after + 10.0 {
+        *done = true;
+        if let Ok(mut f) = std::fs::File::create(path) {
+            let _ = f.write_all(lines.join("\n").as_bytes());
+        }
+    }
 }
 
 /// Ranges of one submission closer than this are asked about together:
@@ -1117,7 +1215,7 @@ fn ask_rest(ranges: &[(usize, usize)], held: bool) {
         let (first, last) = alone_ranges[r];
         #[cfg(feature = "diagnostics")]
         let asking = std::time::Instant::now();
-        let found = kernel_written(first, last);
+        let found = { site("rest"); kernel_written(first, last) };
         #[cfg(feature = "diagnostics")]
         alone(first * PAGE, last * PAGE, found.as_ref().map_or(0, Vec::len), asking.elapsed());
         found
@@ -1269,7 +1367,7 @@ fn ask_run(pieces: &[(usize, usize)], asked: &mut Vec<(usize, usize)>, written: 
     }
     let first = pieces[0].0;
     let last = pieces.iter().map(|p| p.1).max().unwrap_or(first);
-    if let Some(pages) = kernel_written(first, last) {
+    if let Some(pages) = { site("ahead"); kernel_written(first, last) } {
         written.extend(pages);
         asked.push((first, last));
         return;
@@ -1327,6 +1425,15 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     if !guarded && refused_as_view(start, end) {
         return None;
     }
+    // Refused by the kernel before (view memory, which has no write watch):
+    // not asked again. A refusal takes Wine's one lock for all of memory
+    // like any asking, and a texture there asked twice at every refresh
+    // (180 refusals a frame, 23 us each, run 135); the submission's askings
+    // waited behind them.
+    let known_refused = refused_before(first, last);
+    if !guarded && known_refused {
+        return None;
+    }
     // Asked, and the answer noted, with the range held: nothing else asks
     // about any of it in between.
     let _range = Asking::hold(first, last);
@@ -1341,22 +1448,36 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     if viewed {
         port6_count(P6_NOT_ASKED, 1);
     }
-    let refused = protected || viewed;
-    let pages = match if refused { None } else { kernel_written(first, last) } {
+    let refused = protected || viewed || known_refused;
+    let pages = match if refused { None } else { { site("writes"); kernel_written(first, last) } } {
         Some(pages) => pages,
         None => {
             guards_asked = true;
+            if !refused {
+                note_refused(first, last);
+            }
             if !guarded {
                 return None;
             }
             #[cfg(feature = "diagnostics")]
             let guarding = std::time::Instant::now();
             let mut written = guard(first * PAGE, last * PAGE).map(|pages| pages.into_iter().map(|p| (p, WHOLE)).collect::<Vec<_>>());
+            if written.is_none() && known_refused && !viewed {
+                // Not view memory now (the guards would not take it): the
+                // refusal is forgotten and the kernel asked (and, refused
+                // again, it stands: neither the kernel nor the guards take
+                // such a range, one across reservations).
+                if let Some(pages) = { site("writes-again"); kernel_written(first, last) } {
+                    forget_refused(first, last);
+                    guards_asked = false;
+                    written = Some(pages);
+                }
+            }
             if written.is_none() && viewed {
                 // Not a view after all (other memory there now): forgotten as
                 // one, and the kernel asked as before.
                 (first..last).for_each(|block| VIEWS.clear(block));
-                if let Some(pages) = kernel_written(first, last) {
+                if let Some(pages) = { site("writes-view"); kernel_written(first, last) } {
                     guards_asked = false;
                     written = Some(pages);
                 }

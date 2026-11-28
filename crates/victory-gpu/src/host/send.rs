@@ -86,7 +86,8 @@ fn pass(host: &Host) -> Option<&'static Pass> {
         // SAFETY: the code lives through the calls; the root signature is
         // inside it.
         unsafe {
-            let root: ID3D12RootSignature = host.device.CreateRootSignature(0, &code).ok()?;
+            // As the shader's `RS`, made here: Wine's compiler embeds none.
+            let root: ID3D12RootSignature = crate::rootsig::of_source(&host.device, SCATTER, "send scatter").ok()?;
             let pso: ID3D12PipelineState = host
                 .device
                 .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
@@ -283,7 +284,8 @@ impl Own {
         list: &ID3D12GraphicsCommandList,
         dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, usize)>)],
         looked: impl Fn(&Shadow) -> bool,
-    ) {
+    ) -> Vec<(ID3D12Resource, D3D12_RESOURCE_STATES)> {
+        let mut left = Vec::new();
         let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         let write = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         let dest = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -306,6 +308,10 @@ impl Own {
                 && (!copy.runs.is_empty() || copy.pairs.1 > 0)
             {
                 last.push(transition(&shadow.buffer, was, read));
+                state = Some(read);
+            }
+            if let Some(state) = state {
+                left.push((shadow.buffer.clone(), state));
             }
         }
         // SAFETY: the caller's; live objects.
@@ -337,6 +343,7 @@ impl Own {
                 list.ResourceBarrier(&last);
             }
         }
+        left
     }
 
     /// The memory, to be kept until the submission has run.

@@ -79,3 +79,6 @@ validate_*.txt
 *.swp
 Thumbs.db
 .DS_Store
+
+# vkd3d-proton writes its pipeline cache in the working directory of test runs
+vkd3d-proton.cache*
