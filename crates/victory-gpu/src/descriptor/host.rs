@@ -157,6 +157,11 @@ pub(crate) struct HostHeap {
     /// waited for most (5.6 % of their time, profile waits-1: each descriptor
     /// made for a draw takes it, and lets go of what the slot held under it).
     kept: Box<[Mutex<Option<ID3D12Resource>>]>,
+    /// What each slot of [`kept`](Self::kept) holds, as its raw pointer
+    /// (0: nothing), written under that slot's lock: [`keep`](Self::keep)
+    /// of what a slot already holds returns without the lock
+    /// (`VICTORY_KEEP_QUICK=1`; off by default).
+    kept_raw: Box<[std::sync::atomic::AtomicUsize]>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -1633,6 +1638,7 @@ impl HostHeap {
             waiting: Mutex::default(),
             away: Mutex::default(),
             kept: (0..count + extra).map(|_| Mutex::new(None)).collect(),
+            kept_raw: (0..count + extra).map(|_| std::sync::atomic::AtomicUsize::new(0)).collect(),
             next: Mutex::new((0, vec![false; extra as usize])),
             free: std::sync::atomic::AtomicU32::new(extra),
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
@@ -3019,16 +3025,27 @@ impl HostHeap {
 
     /// Slot `index` now views `resource` (or nothing of the host's).
     fn keep(&self, index: u32, resource: Option<ID3D12Resource>) {
+        use windows::core::Interface;
         let Some(slot) = self.kept.get(index as usize) else {
             return;
         };
+        let raw = resource.as_ref().map_or(0, |r| r.as_raw() as usize);
+        // What the slot holds already, without its lock: most calls (the
+        // lock's two atomic operations on a cold line were 18 % of the heaps'
+        // records, run 144). Read as it was at some moment under the lock: a
+        // replacement racing with this call is then ordered after it. The
+        // slot holds a reference to what it shows, so no other object comes
+        // to that address meanwhile.
+        if keep_quick() && self.kept_raw[index as usize].load(std::sync::atomic::Ordering::Acquire) == raw {
+            return;
+        }
         let old = {
-            use windows::core::Interface;
             let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
             // The same again: nothing to retire.
             if slot.as_ref().map(Interface::as_raw) == resource.as_ref().map(Interface::as_raw) {
                 return;
             }
+            self.kept_raw[index as usize].store(raw, std::sync::atomic::Ordering::Release);
             std::mem::replace(&mut *slot, resource)
         };
         // A running submission may still read the old resource through
@@ -6489,4 +6506,13 @@ mod bake_flip_tests {
         drop(cb2);
         assert!(take_pending_list_flip(id2).is_none(), "dropping uncalled closure cleans up entry");
     }
+}
+
+/// Whether [`HostHeap::keep`] looks at what a slot holds without its lock
+/// first (`VICTORY_KEEP_QUICK=1`; off by default: runs 145-148 measured
+/// 41.2 ms on against 42.2/41.4 off, within noise, and one run with it on
+/// froze, cause unknown).
+fn keep_quick() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_QUICK").is_some_and(|v| v == "1"))
 }

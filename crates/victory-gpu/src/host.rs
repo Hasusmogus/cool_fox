@@ -92,19 +92,6 @@ enum Retired {
 unsafe impl Send for Retired {}
 
 /// Milliseconds since the first call.
-/// Whether we run under Wine or Proton (its ntdll exports `wine_get_version`).
-pub fn under_wine() -> bool {
-    static WINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *WINE.get_or_init(|| {
-        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-        // SAFETY: plain lookups in ntdll, always loaded.
-        unsafe {
-            let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
-            !ntdll.is_null() && GetProcAddress(ntdll, c"wine_get_version".as_ptr().cast()).is_some()
-        }
-    })
-}
-
 pub(crate) fn now_ms() -> u64 {
     static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
     EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64

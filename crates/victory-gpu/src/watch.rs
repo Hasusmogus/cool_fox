@@ -620,16 +620,16 @@ impl Drop for Asking {
 }
 
 /// Pages of write-watched memory asked about in one call, if asked in
-/// pieces: `VICTORY_WATCH_CHUNK_MB` (8 by default under Wine, whose answer
-/// holds its lock for all of memory; 0, and on Windows by default: one call
-/// for the whole range, as before). From upstream (Hasusmogus, PR #71).
+/// pieces: `VICTORY_WATCH_CHUNK_MB` (0 by default: one call for the whole
+/// range, as before; ~1 ms a frame faster than 8 under Wine, run 114). From
+/// upstream (Hasusmogus, PR #71).
 fn watch_chunk() -> Option<usize> {
     static CHUNK: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *CHUNK.get_or_init(|| {
         let mb = std::env::var("VICTORY_WATCH_CHUNK_MB")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(if crate::host::under_wine() { 8 } else { 0 });
+            .unwrap_or(0);
         (mb > 0).then_some((mb << 20) / PAGE)
     })
 }
@@ -751,6 +751,16 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
         #[cfg(feature = "diagnostics")]
         if failed {
             ask_log(last - first, usize::MAX, started.elapsed().as_nanos() as u64);
+        }
+        if failed && filled > 0 && !keep {
+            // Asked in pieces: the pieces before the one refused reset what
+            // they found. Those writes are in the journal, or no asking would
+            // see them again (the caller asks again by halves, or the guards).
+            let now = next_asking();
+            let mut j = journal_mut();
+            for &at in &found[..filled] {
+                j.notes.note(at / PAGE, 1u16 << (at % PAGE / KERNEL_PAGE), now);
+            }
         }
         if failed {
             // (On the timeline: how many askings the kernel refuses.)

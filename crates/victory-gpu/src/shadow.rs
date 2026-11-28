@@ -351,8 +351,13 @@ fn list_carded(shadow: &Arc<Shadow>) {
     let weak = Arc::downgrade(shadow);
     if let Some(card) = &shadow.card {
         let _ = card.me.set(weak.clone());
+        if !card_dirty_scan() {
+            // Queued once, and marked so: its first change does not queue it
+            // again (twice in one `card_dirty` it got two sets of barriers).
+            card.touched.store(true, Ordering::Release);
+            TOUCHED.lock().unwrap_or_else(|e| e.into_inner()).push(weak.clone());
+        }
     }
-    TOUCHED.lock().unwrap_or_else(|e| e.into_inner()).push(weak.clone());
     CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(weak);
 }
 
@@ -671,7 +676,12 @@ pub(crate) fn card_dirty(sent_as: u64) -> Vec<(Arc<Shadow>, Vec<(usize, usize)>)
             CARDED.lock().unwrap_or_else(|e| e.into_inner()).retain(|w| w.strong_count() > 0);
         }
         let touched = std::mem::take(&mut *TOUCHED.lock().unwrap_or_else(|e| e.into_inner()));
+        // Each copy at most once, however it came to be queued twice.
+        let mut seen = std::collections::HashSet::with_capacity(touched.len());
         for weak in touched {
+            if !seen.insert(weak.as_ptr() as usize) {
+                continue;
+            }
             let Some(shadow) = weak.upgrade() else {
                 continue;
             };
@@ -686,22 +696,7 @@ pub(crate) fn card_dirty(sent_as: u64) -> Vec<(Arc<Shadow>, Vec<(usize, usize)>)
         let Some(shadow) = weak.upgrade() else {
             return false;
         };
-        let ranges = shadow
-            .card
-            .as_ref()
-            .filter(|c| c.touched.swap(false, Ordering::AcqRel))
-            .map(|c| {
-                let mut dirty = c.dirty.lock().unwrap_or_else(|e| e.into_inner());
-                let ranges = joined(std::mem::take(&mut *dirty));
-                if relay() {
-                    let mut sent = c.sent.lock().unwrap_or_else(|e| e.into_inner());
-                    sent.forget(fetched);
-                    sent.note_joined(sent_as, ranges.clone());
-                }
-                ranges
-            })
-            .unwrap_or_default();
-        if !ranges.is_empty() {
+        if let Some(ranges) = take_card_dirty(&shadow, sent_as, fetched) {
             out.push((shadow, ranges));
         }
         true
@@ -4215,6 +4210,7 @@ impl Shadow {
         }
         // (Under the lock: what takes the list sees it or finds it set.)
         if !card.touched.swap(true, Ordering::AcqRel)
+            && !card_dirty_scan()
             && let Some(me) = card.me.get()
         {
             TOUCHED.lock().unwrap_or_else(|e| e.into_inner()).push(me.clone());
